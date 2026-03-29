@@ -36,6 +36,37 @@ const voicePeerConnection = ref<RTCPeerConnection | null>(null)
 const localAudioStream = ref<MediaStream | null>(null)
 const currentCallerId = ref<string | null>(null)
 
+// Browser notifications
+async function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    await Notification.requestPermission()
+  }
+}
+
+function showCallNotification() {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const notification = new Notification('Incoming Call', {
+      body: 'Admin wants to talk to you',
+      icon: '/favicon.ico',
+      tag: 'incoming-call',
+      requireInteraction: true,
+    })
+
+    notification.onclick = () => {
+      window.focus()
+      notification.close()
+    }
+
+    // Close notification when call is answered or rejected
+    const checkCallStatus = setInterval(() => {
+      if (callStatus.value !== 'ringing') {
+        notification.close()
+        clearInterval(checkCallStatus)
+      }
+    }, 500)
+  }
+}
+
 const socket = getSocket()
 
 const statusText = computed(() => {
@@ -91,6 +122,9 @@ async function startSharing() {
     }
 
     status.value = 'sharing'
+
+    // Request notification permission for incoming calls
+    requestNotificationPermission()
 
     // Connect to signaling server
     connectSocket()
@@ -178,6 +212,9 @@ socket.on('call-incoming', (data: { callerId: string }) => {
   console.log('[Call] Incoming call from:', data.callerId)
   incomingCall.value = { callerId: data.callerId }
   callStatus.value = 'ringing'
+
+  // Show browser notification
+  showCallNotification()
 })
 
 async function acceptCall() {
