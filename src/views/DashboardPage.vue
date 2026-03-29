@@ -4,6 +4,7 @@ import { getSocket, connectSocket, disconnectSocket } from '@/lib/socket'
 import {
   createPeerConnection,
   createAnswer,
+  createOffer,
   setRemoteDescription,
   addIceCandidate,
   closePeerConnection,
@@ -21,6 +22,89 @@ const sessions = ref<Map<string, ActiveSession>>(new Map())
 const peerConnections = new Map<string, RTCPeerConnection>()
 // Map sharer socket IDs to tokens for ICE candidate routing
 const sharerIdToToken = new Map<string, string>()
+
+// Voice call state
+const callStatus = ref<Map<string, 'idle' | 'calling' | 'connected'>>(new Map())
+const voicePeerConnections = new Map<string, RTCPeerConnection>()
+const localAudioStream = ref<MediaStream | null>(null)
+const workerIdByToken = new Map<string, string>()
+
+function getCallStatus(token: string): 'idle' | 'calling' | 'connected' {
+  return callStatus.value.get(token) || 'idle'
+}
+
+async function initiateCall(token: string) {
+  try {
+    // Get microphone access
+    if (!localAudioStream.value) {
+      localAudioStream.value = await navigator.mediaDevices.getUserMedia({ audio: true })
+    }
+
+    callStatus.value.set(token, 'calling')
+    callStatus.value = new Map(callStatus.value) // Trigger reactivity
+
+    // Send call request to worker
+    socket.emit('call-request', { token })
+  } catch (err) {
+    console.error('Failed to get microphone:', err)
+    alert('Could not access microphone. Please allow microphone access.')
+  }
+}
+
+async function setupVoiceConnection(token: string, workerId: string) {
+  if (!localAudioStream.value) return
+
+  workerIdByToken.set(token, workerId)
+
+  const pc = createPeerConnection({
+    onIceCandidate: (candidate) => {
+      socket.emit('voice-ice-candidate', {
+        targetId: workerId,
+        candidate: candidate.toJSON(),
+        token,
+      })
+    },
+    onTrack: (event) => {
+      // Play incoming audio from worker
+      const audio = new Audio()
+      audio.srcObject = event.streams[0]
+      audio.play()
+    },
+  })
+
+  // Add local audio track
+  localAudioStream.value.getTracks().forEach((track) => {
+    pc.addTrack(track, localAudioStream.value!)
+  })
+
+  voicePeerConnections.set(token, pc)
+
+  // Create and send offer
+  const offer = await createOffer(pc)
+  socket.emit('voice-offer', {
+    targetId: workerId,
+    offer,
+    token,
+  })
+}
+
+function endCall(token: string) {
+  const workerId = workerIdByToken.get(token)
+  if (workerId) {
+    socket.emit('call-ended', { targetId: workerId, token })
+  }
+
+  // Clean up voice peer connection
+  const vpc = voicePeerConnections.get(token)
+  if (vpc) {
+    closePeerConnection(vpc)
+    voicePeerConnections.delete(token)
+  }
+
+  workerIdByToken.delete(token)
+  callStatus.value.set(token, 'idle')
+  callStatus.value = new Map(callStatus.value)
+}
 
 // Focus mode
 const focusedToken = ref<string | null>(null)
@@ -163,6 +247,50 @@ socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandi
   }
 })
 
+// Voice call event handlers
+socket.on('call-accepted', async (data: { token: string; workerId: string }) => {
+  console.log('[Call] Worker accepted:', data.token)
+  callStatus.value.set(data.token, 'connected')
+  callStatus.value = new Map(callStatus.value)
+  await setupVoiceConnection(data.token, data.workerId)
+})
+
+socket.on('call-rejected', (data: { token: string }) => {
+  console.log('[Call] Worker rejected:', data.token)
+  callStatus.value.set(data.token, 'idle')
+  callStatus.value = new Map(callStatus.value)
+})
+
+socket.on('call-ended', (data: { token: string }) => {
+  console.log('[Call] Worker ended call:', data.token)
+  const vpc = voicePeerConnections.get(data.token)
+  if (vpc) {
+    closePeerConnection(vpc)
+    voicePeerConnections.delete(data.token)
+  }
+  workerIdByToken.delete(data.token)
+  callStatus.value.set(data.token, 'idle')
+  callStatus.value = new Map(callStatus.value)
+})
+
+socket.on('voice-answer', async (data: { workerId: string; answer: RTCSessionDescriptionInit; token: string }) => {
+  const pc = voicePeerConnections.get(data.token)
+  if (pc) {
+    await setRemoteDescription(pc, data.answer)
+  }
+})
+
+socket.on('voice-ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit; token: string }) => {
+  const pc = voicePeerConnections.get(data.token)
+  if (pc) {
+    try {
+      await addIceCandidate(pc, data.candidate)
+    } catch {
+      // ICE candidate might arrive before remote description
+    }
+  }
+})
+
 function focusSession(token: string) {
   focusedToken.value = token
 }
@@ -183,7 +311,13 @@ onMounted(() => {
 onUnmounted(() => {
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
+  voicePeerConnections.forEach((pc) => closePeerConnection(pc))
+  voicePeerConnections.clear()
+  if (localAudioStream.value) {
+    localAudioStream.value.getTracks().forEach((track) => track.stop())
+  }
   sharerIdToToken.clear()
+  workerIdByToken.clear()
   disconnectSocket()
 })
 
@@ -260,7 +394,10 @@ function handleAuth() {
           v-for="session in sessionList"
           :key="session.token"
           :session="session"
+          :call-status="getCallStatus(session.token)"
           @focus="focusSession"
+          @call="initiateCall"
+          @hangup="endCall"
         />
       </div>
     </main>

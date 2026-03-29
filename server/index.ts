@@ -127,6 +127,62 @@ io.on('connection', (socket) => {
     io.to('dashboard').emit('session-left', { token: data.token })
   })
 
+  // Voice call signaling
+  socket.on('call-request', (data: { token: string }) => {
+    const session = activeSessions.get(data.token)
+    if (session) {
+      console.log(`[Call] Dashboard requesting call with ${data.token}`)
+      io.to(session.socketId).emit('call-incoming', {
+        callerId: socket.id,
+      })
+    }
+  })
+
+  socket.on('call-accepted', (data: { callerId: string; token: string }) => {
+    console.log(`[Call] Worker accepted call from ${data.callerId}`)
+    io.to(data.callerId).emit('call-accepted', {
+      token: data.token,
+      workerId: socket.id,
+    })
+  })
+
+  socket.on('call-rejected', (data: { callerId: string; token: string }) => {
+    console.log(`[Call] Worker rejected call from ${data.callerId}`)
+    io.to(data.callerId).emit('call-rejected', { token: data.token })
+  })
+
+  socket.on('call-ended', (data: { targetId: string; token: string }) => {
+    console.log(`[Call] Call ended for ${data.token}`)
+    io.to(data.targetId).emit('call-ended', { token: data.token })
+  })
+
+  // Voice WebRTC signaling
+  socket.on('voice-offer', (data: { targetId: string; offer: RTCSessionDescriptionInit; token: string }) => {
+    console.log(`[Voice] Offer from ${socket.id} to ${data.targetId}`)
+    io.to(data.targetId).emit('voice-offer', {
+      callerId: socket.id,
+      offer: data.offer,
+      token: data.token,
+    })
+  })
+
+  socket.on('voice-answer', (data: { callerId: string; answer: RTCSessionDescriptionInit; token: string }) => {
+    console.log(`[Voice] Answer from ${socket.id} to ${data.callerId}`)
+    io.to(data.callerId).emit('voice-answer', {
+      workerId: socket.id,
+      answer: data.answer,
+      token: data.token,
+    })
+  })
+
+  socket.on('voice-ice-candidate', (data: { targetId: string; candidate: RTCIceCandidateInit; token: string }) => {
+    io.to(data.targetId).emit('voice-ice-candidate', {
+      fromId: socket.id,
+      candidate: data.candidate,
+      token: data.token,
+    })
+  })
+
   // Handle disconnect
   socket.on('disconnect', () => {
     console.log(`[Socket] Disconnected: ${socket.id}`)

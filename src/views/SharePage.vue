@@ -5,6 +5,7 @@ import { getSocket, connectSocket, disconnectSocket } from '@/lib/socket'
 import {
   createPeerConnection,
   createOffer,
+  createAnswer,
   setRemoteDescription,
   addIceCandidate,
   closePeerConnection,
@@ -27,6 +28,13 @@ const videoElement = ref<HTMLVideoElement | null>(null)
 
 // Track peer connections to dashboard viewers
 const peerConnections = new Map<string, RTCPeerConnection>()
+
+// Voice call state
+const incomingCall = ref<{ callerId: string } | null>(null)
+const callStatus = ref<'idle' | 'ringing' | 'connected'>('idle')
+const voicePeerConnection = ref<RTCPeerConnection | null>(null)
+const localAudioStream = ref<MediaStream | null>(null)
+const currentCallerId = ref<string | null>(null)
 
 const socket = getSocket()
 
@@ -165,6 +173,123 @@ socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandi
   }
 })
 
+// Voice call handlers
+socket.on('call-incoming', (data: { callerId: string }) => {
+  console.log('[Call] Incoming call from:', data.callerId)
+  incomingCall.value = { callerId: data.callerId }
+  callStatus.value = 'ringing'
+})
+
+async function acceptCall() {
+  if (!incomingCall.value) return
+
+  try {
+    // Get microphone access
+    localAudioStream.value = await navigator.mediaDevices.getUserMedia({ audio: true })
+    currentCallerId.value = incomingCall.value.callerId
+
+    // Notify dashboard that call was accepted
+    socket.emit('call-accepted', {
+      callerId: incomingCall.value.callerId,
+      token: token.value,
+    })
+
+    callStatus.value = 'connected'
+    incomingCall.value = null
+  } catch (err) {
+    console.error('Failed to get microphone:', err)
+    rejectCall()
+  }
+}
+
+function rejectCall() {
+  if (!incomingCall.value) return
+
+  socket.emit('call-rejected', {
+    callerId: incomingCall.value.callerId,
+    token: token.value,
+  })
+
+  incomingCall.value = null
+  callStatus.value = 'idle'
+}
+
+function endCallFromWorker() {
+  if (currentCallerId.value) {
+    socket.emit('call-ended', {
+      targetId: currentCallerId.value,
+      token: token.value,
+    })
+  }
+
+  cleanupVoiceCall()
+}
+
+function cleanupVoiceCall() {
+  if (voicePeerConnection.value) {
+    closePeerConnection(voicePeerConnection.value)
+    voicePeerConnection.value = null
+  }
+  if (localAudioStream.value) {
+    localAudioStream.value.getTracks().forEach((track) => track.stop())
+    localAudioStream.value = null
+  }
+  currentCallerId.value = null
+  callStatus.value = 'idle'
+}
+
+// Handle voice offer from dashboard
+socket.on('voice-offer', async (data: { callerId: string; offer: RTCSessionDescriptionInit; token: string }) => {
+  if (!localAudioStream.value) return
+
+  const pc = createPeerConnection({
+    onIceCandidate: (candidate) => {
+      socket.emit('voice-ice-candidate', {
+        targetId: data.callerId,
+        candidate: candidate.toJSON(),
+        token: token.value,
+      })
+    },
+    onTrack: (event) => {
+      // Play incoming audio from dashboard
+      const audio = new Audio()
+      audio.srcObject = event.streams[0]
+      audio.play()
+    },
+  })
+
+  voicePeerConnection.value = pc
+
+  // Add local audio track
+  localAudioStream.value.getTracks().forEach((track) => {
+    pc.addTrack(track, localAudioStream.value!)
+  })
+
+  await setRemoteDescription(pc, data.offer)
+  const answer = await createAnswer(pc)
+
+  socket.emit('voice-answer', {
+    callerId: data.callerId,
+    answer,
+    token: token.value,
+  })
+})
+
+socket.on('voice-ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit; token: string }) => {
+  if (voicePeerConnection.value) {
+    try {
+      await addIceCandidate(voicePeerConnection.value, data.candidate)
+    } catch {
+      // ICE candidate might arrive before remote description
+    }
+  }
+})
+
+socket.on('call-ended', () => {
+  console.log('[Call] Dashboard ended call')
+  cleanupVoiceCall()
+})
+
 onMounted(() => {
   // Validate token exists
   if (!token.value) {
@@ -177,12 +302,43 @@ onUnmounted(() => {
   if (status.value === 'sharing') {
     stopSharing()
   }
+  cleanupVoiceCall()
   disconnectSocket()
 })
 </script>
 
 <template>
   <div class="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+    <!-- Incoming call modal -->
+    <div
+      v-if="callStatus === 'ringing'"
+      class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+    >
+      <div class="bg-white rounded-xl shadow-2xl p-8 max-w-sm w-full text-center animate-pulse">
+        <div class="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg class="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+          </svg>
+        </div>
+        <h3 class="text-xl font-bold text-gray-900 mb-2">Incoming Call</h3>
+        <p class="text-gray-600 mb-6">Admin wants to talk to you</p>
+        <div class="flex gap-4 justify-center">
+          <button
+            @click="rejectCall"
+            class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition"
+          >
+            Decline
+          </button>
+          <button
+            @click="acceptCall"
+            class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition"
+          >
+            Accept
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div class="bg-white rounded-xl shadow-lg max-w-lg w-full p-8">
       <div class="text-center mb-6">
         <h1 class="text-2xl font-bold text-gray-900 mb-1">DeskShare</h1>
@@ -252,6 +408,23 @@ onUnmounted(() => {
             </svg>
             <p class="text-sm">Preview will appear here</p>
           </div>
+        </div>
+
+        <!-- Voice call indicator -->
+        <div
+          v-if="callStatus === 'connected'"
+          class="bg-green-100 border border-green-300 rounded-lg p-4 mb-4 flex items-center justify-between"
+        >
+          <div class="flex items-center gap-3">
+            <div class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+            <span class="text-green-800 font-medium">Voice call active</span>
+          </div>
+          <button
+            @click="endCallFromWorker"
+            class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition"
+          >
+            End Call
+          </button>
         </div>
 
         <!-- Status -->
