@@ -19,6 +19,8 @@ const authError = ref('')
 // Sessions state
 const sessions = ref<Map<string, ActiveSession>>(new Map())
 const peerConnections = new Map<string, RTCPeerConnection>()
+// Map sharer socket IDs to tokens for ICE candidate routing
+const sharerIdToToken = new Map<string, string>()
 
 // Focus mode
 const focusedToken = ref<string | null>(null)
@@ -92,6 +94,13 @@ socket.on('session-left', (data: { token: string }) => {
     closePeerConnection(pc)
     peerConnections.delete(data.token)
   }
+  // Clean up sharer ID mapping
+  for (const [sharerId, token] of sharerIdToToken) {
+    if (token === data.token) {
+      sharerIdToToken.delete(sharerId)
+      break
+    }
+  }
   if (focusedToken.value === data.token) {
     focusedToken.value = null
   }
@@ -101,6 +110,9 @@ socket.on('session-left', (data: { token: string }) => {
 socket.on(
   'offer',
   async (data: { sharerId: string; offer: RTCSessionDescriptionInit; token: string }) => {
+    // Store mapping for ICE candidate routing
+    sharerIdToToken.set(data.sharerId, data.token)
+
     const pc = createPeerConnection({
       onIceCandidate: (candidate) => {
         socket.emit('ice-candidate', {
@@ -137,8 +149,9 @@ socket.on(
 
 // Handle ICE candidate from sharer
 socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
-  // Find PC by sharer socket ID (need to iterate)
-  for (const [token, session] of sessions.value) {
+  // Find the correct peer connection using the sharer ID mapping
+  const token = sharerIdToToken.get(data.fromId)
+  if (token) {
     const pc = peerConnections.get(token)
     if (pc) {
       try {
@@ -170,6 +183,7 @@ onMounted(() => {
 onUnmounted(() => {
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
+  sharerIdToToken.clear()
   disconnectSocket()
 })
 
