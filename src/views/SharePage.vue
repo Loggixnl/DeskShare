@@ -37,19 +37,48 @@ const localAudioStream = ref<MediaStream | null>(null)
 const currentCallerId = ref<string | null>(null)
 
 // Browser notifications
+const notificationPermission = ref<NotificationPermission | 'unsupported'>('default')
+
 async function requestNotificationPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    await Notification.requestPermission()
+  if (!('Notification' in window)) {
+    notificationPermission.value = 'unsupported'
+    console.log('[Notification] Not supported in this browser')
+    return
+  }
+
+  if (Notification.permission === 'default') {
+    const result = await Notification.requestPermission()
+    notificationPermission.value = result
+    console.log('[Notification] Permission:', result)
+  } else {
+    notificationPermission.value = Notification.permission
+    console.log('[Notification] Already:', Notification.permission)
   }
 }
 
 function showCallNotification() {
-  if ('Notification' in window && Notification.permission === 'granted') {
-    const notification = new Notification('Incoming Call', {
-      body: 'Admin wants to talk to you',
+  console.log('[Notification] Attempting to show notification, permission:', Notification.permission)
+
+  // Play a sound as fallback
+  playRingtone()
+
+  if (!('Notification' in window)) {
+    console.log('[Notification] Not supported')
+    return
+  }
+
+  if (Notification.permission !== 'granted') {
+    console.log('[Notification] Permission not granted:', Notification.permission)
+    return
+  }
+
+  try {
+    const notification = new Notification('📞 Incoming Call - DeskShare', {
+      body: 'Admin wants to talk to you. Click to answer.',
       icon: '/favicon.ico',
       tag: 'incoming-call',
       requireInteraction: true,
+      silent: false,
     })
 
     notification.onclick = () => {
@@ -64,6 +93,43 @@ function showCallNotification() {
         clearInterval(checkCallStatus)
       }
     }, 500)
+
+    console.log('[Notification] Shown successfully')
+  } catch (err) {
+    console.error('[Notification] Failed to show:', err)
+  }
+}
+
+// Ringtone audio
+let ringtoneAudio: HTMLAudioElement | null = null
+
+function playRingtone() {
+  // Create a simple beep using Web Audio API as fallback
+  try {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const oscillator = audioContext.createOscillator()
+    const gainNode = audioContext.createGain()
+
+    oscillator.connect(gainNode)
+    gainNode.connect(audioContext.destination)
+
+    oscillator.frequency.value = 440
+    oscillator.type = 'sine'
+    gainNode.gain.value = 0.3
+
+    oscillator.start()
+
+    // Beep pattern: on-off-on-off
+    setTimeout(() => { gainNode.gain.value = 0 }, 200)
+    setTimeout(() => { gainNode.gain.value = 0.3 }, 400)
+    setTimeout(() => { gainNode.gain.value = 0 }, 600)
+    setTimeout(() => { gainNode.gain.value = 0.3 }, 800)
+    setTimeout(() => {
+      oscillator.stop()
+      audioContext.close()
+    }, 1000)
+  } catch (err) {
+    console.log('[Ringtone] Could not play:', err)
   }
 }
 
@@ -445,6 +511,25 @@ onUnmounted(() => {
             </svg>
             <p class="text-sm">Preview will appear here</p>
           </div>
+        </div>
+
+        <!-- Notification permission indicator (only show when sharing) -->
+        <div
+          v-if="status === 'sharing' && notificationPermission !== 'granted'"
+          class="bg-yellow-50 border border-yellow-300 rounded-lg p-3 mb-4 flex items-center justify-between"
+        >
+          <div class="flex items-center gap-2 text-yellow-800 text-sm">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+            </svg>
+            <span>Enable notifications to receive call alerts</span>
+          </div>
+          <button
+            @click="requestNotificationPermission"
+            class="px-3 py-1 bg-yellow-500 hover:bg-yellow-600 text-white text-sm font-medium rounded transition"
+          >
+            Enable
+          </button>
         </div>
 
         <!-- Voice call indicator -->
