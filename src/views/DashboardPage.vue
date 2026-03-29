@@ -31,6 +31,49 @@ const workerIdByToken = new Map<string, string>()
 
 // Incoming call from worker
 const incomingWorkerCall = ref<{ token: string; workerName: string; workerId: string } | null>(null)
+let ringtoneInterval: number | null = null
+
+function playRingtone() {
+  // Stop any existing ringtone
+  stopRingtone()
+
+  // Play repeating ring sound
+  const playBeep = () => {
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      oscillator.frequency.value = 440
+      oscillator.type = 'sine'
+      gainNode.gain.value = 0.3
+      oscillator.start()
+
+      // Ring pattern: beep-beep
+      setTimeout(() => { gainNode.gain.value = 0 }, 150)
+      setTimeout(() => { gainNode.gain.value = 0.3 }, 250)
+      setTimeout(() => { gainNode.gain.value = 0 }, 400)
+      setTimeout(() => {
+        oscillator.stop()
+        audioContext.close()
+      }, 500)
+    } catch (e) {
+      console.log('[Ringtone] Could not play')
+    }
+  }
+
+  // Play immediately and then repeat
+  playBeep()
+  ringtoneInterval = window.setInterval(playBeep, 1500)
+}
+
+function stopRingtone() {
+  if (ringtoneInterval) {
+    clearInterval(ringtoneInterval)
+    ringtoneInterval = null
+  }
+}
 
 function getCallStatus(token: string): 'idle' | 'calling' | 'connected' {
   return callStatus.value.get(token) || 'idle'
@@ -38,6 +81,8 @@ function getCallStatus(token: string): 'idle' | 'calling' | 'connected' {
 
 async function acceptWorkerCall() {
   if (!incomingWorkerCall.value) return
+
+  stopRingtone()
 
   try {
     // Get microphone access
@@ -66,6 +111,8 @@ async function acceptWorkerCall() {
 
 function rejectWorkerCall() {
   if (!incomingWorkerCall.value) return
+
+  stopRingtone()
 
   socket.emit('admin-reject-call', {
     workerId: incomingWorkerCall.value.workerId,
@@ -300,24 +347,8 @@ socket.on('worker-calling', (data: { token: string; workerName: string; workerId
     workerId: data.workerId,
   }
 
-  // Play notification sound
-  try {
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-    const oscillator = audioContext.createOscillator()
-    const gainNode = audioContext.createGain()
-    oscillator.connect(gainNode)
-    gainNode.connect(audioContext.destination)
-    oscillator.frequency.value = 440
-    oscillator.type = 'sine'
-    gainNode.gain.value = 0.3
-    oscillator.start()
-    setTimeout(() => { gainNode.gain.value = 0 }, 200)
-    setTimeout(() => { gainNode.gain.value = 0.3 }, 400)
-    setTimeout(() => { gainNode.gain.value = 0 }, 600)
-    setTimeout(() => { oscillator.stop(); audioContext.close() }, 800)
-  } catch (e) {
-    console.log('[Call] Could not play notification sound')
-  }
+  // Play repeating ringtone
+  playRingtone()
 
   // Show browser notification
   if ('Notification' in window && Notification.permission === 'granted') {
@@ -393,6 +424,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopRingtone()
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
   voicePeerConnections.forEach((pc) => closePeerConnection(pc))
