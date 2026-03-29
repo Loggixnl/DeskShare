@@ -31,10 +31,37 @@ const peerConnections = new Map<string, RTCPeerConnection>()
 
 // Voice call state
 const incomingCall = ref<{ callerId: string } | null>(null)
-const callStatus = ref<'idle' | 'ringing' | 'connected'>('idle')
+const callStatus = ref<'idle' | 'ringing' | 'calling' | 'connected'>('idle')
 const voicePeerConnection = ref<RTCPeerConnection | null>(null)
 const localAudioStream = ref<MediaStream | null>(null)
 const currentCallerId = ref<string | null>(null)
+
+// Worker calling admin
+async function callAdmin() {
+  try {
+    // Get microphone access first
+    localAudioStream.value = await navigator.mediaDevices.getUserMedia({ audio: true })
+    callStatus.value = 'calling'
+
+    // Notify dashboard
+    socket.emit('worker-call-admin', {
+      token: token.value,
+      workerName: workerName.value
+    })
+  } catch (err) {
+    console.error('Failed to get microphone:', err)
+    alert('Could not access microphone. Please allow microphone access.')
+  }
+}
+
+function cancelCall() {
+  if (localAudioStream.value) {
+    localAudioStream.value.getTracks().forEach((track) => track.stop())
+    localAudioStream.value = null
+  }
+  callStatus.value = 'idle'
+  // Could emit cancel event here if needed
+}
 
 // Browser notifications
 const notificationPermission = ref<NotificationPermission | 'unsupported'>('default')
@@ -393,6 +420,24 @@ socket.on('call-ended', () => {
   cleanupVoiceCall()
 })
 
+// Worker initiated call - admin responses
+socket.on('admin-accepted', async (data: { adminId: string; token: string }) => {
+  console.log('[Call] Admin accepted our call')
+  currentCallerId.value = data.adminId
+  callStatus.value = 'connected'
+
+  // Now we wait for the voice-offer from admin
+})
+
+socket.on('admin-rejected', () => {
+  console.log('[Call] Admin rejected our call')
+  if (localAudioStream.value) {
+    localAudioStream.value.getTracks().forEach((track) => track.stop())
+    localAudioStream.value = null
+  }
+  callStatus.value = 'idle'
+})
+
 onMounted(() => {
   // Validate token exists
   if (!token.value) {
@@ -532,6 +577,23 @@ onUnmounted(() => {
           </button>
         </div>
 
+        <!-- Calling admin indicator -->
+        <div
+          v-if="callStatus === 'calling'"
+          class="bg-blue-100 border border-blue-300 rounded-lg p-4 mb-4 flex items-center justify-between"
+        >
+          <div class="flex items-center gap-3">
+            <div class="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+            <span class="text-blue-800 font-medium">Calling admin...</span>
+          </div>
+          <button
+            @click="cancelCall"
+            class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-semibold rounded-lg transition"
+          >
+            Cancel
+          </button>
+        </div>
+
         <!-- Voice call indicator -->
         <div
           v-if="callStatus === 'connected'"
@@ -546,6 +608,22 @@ onUnmounted(() => {
             class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition"
           >
             End Call
+          </button>
+        </div>
+
+        <!-- Call admin button (when sharing and not in call) -->
+        <div
+          v-if="status === 'sharing' && callStatus === 'idle'"
+          class="mb-4"
+        >
+          <button
+            @click="callAdmin"
+            class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg transition flex items-center justify-center gap-2"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+            </svg>
+            Call Admin
           </button>
         </div>
 

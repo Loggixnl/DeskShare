@@ -29,8 +29,50 @@ const voicePeerConnections = new Map<string, RTCPeerConnection>()
 const localAudioStream = ref<MediaStream | null>(null)
 const workerIdByToken = new Map<string, string>()
 
+// Incoming call from worker
+const incomingWorkerCall = ref<{ token: string; workerName: string; workerId: string } | null>(null)
+
 function getCallStatus(token: string): 'idle' | 'calling' | 'connected' {
   return callStatus.value.get(token) || 'idle'
+}
+
+async function acceptWorkerCall() {
+  if (!incomingWorkerCall.value) return
+
+  try {
+    // Get microphone access
+    if (!localAudioStream.value) {
+      localAudioStream.value = await navigator.mediaDevices.getUserMedia({ audio: true })
+    }
+
+    const { token, workerId } = incomingWorkerCall.value
+
+    // Notify worker that we accepted
+    socket.emit('admin-accept-call', { workerId, token })
+
+    // Set up voice connection
+    callStatus.value.set(token, 'connected')
+    callStatus.value = new Map(callStatus.value)
+
+    await setupVoiceConnection(token, workerId)
+
+    incomingWorkerCall.value = null
+  } catch (err) {
+    console.error('Failed to get microphone:', err)
+    alert('Could not access microphone. Please allow microphone access.')
+    rejectWorkerCall()
+  }
+}
+
+function rejectWorkerCall() {
+  if (!incomingWorkerCall.value) return
+
+  socket.emit('admin-reject-call', {
+    workerId: incomingWorkerCall.value.workerId,
+    token: incomingWorkerCall.value.token
+  })
+
+  incomingWorkerCall.value = null
 }
 
 async function initiateCall(token: string) {
@@ -248,6 +290,48 @@ socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandi
 })
 
 // Voice call event handlers
+
+// Worker calling admin
+socket.on('worker-calling', (data: { token: string; workerName: string; workerId: string }) => {
+  console.log('[Call] Worker calling:', data.workerName)
+  incomingWorkerCall.value = {
+    token: data.token,
+    workerName: data.workerName,
+    workerId: data.workerId,
+  }
+
+  // Play notification sound
+  try {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const oscillator = audioContext.createOscillator()
+    const gainNode = audioContext.createGain()
+    oscillator.connect(gainNode)
+    gainNode.connect(audioContext.destination)
+    oscillator.frequency.value = 440
+    oscillator.type = 'sine'
+    gainNode.gain.value = 0.3
+    oscillator.start()
+    setTimeout(() => { gainNode.gain.value = 0 }, 200)
+    setTimeout(() => { gainNode.gain.value = 0.3 }, 400)
+    setTimeout(() => { gainNode.gain.value = 0 }, 600)
+    setTimeout(() => { oscillator.stop(); audioContext.close() }, 800)
+  } catch (e) {
+    console.log('[Call] Could not play notification sound')
+  }
+
+  // Show browser notification
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const notification = new Notification(`📞 ${data.workerName} is calling`, {
+      body: 'Click to answer',
+      requireInteraction: true,
+    })
+    notification.onclick = () => {
+      window.focus()
+      notification.close()
+    }
+  }
+})
+
 socket.on('call-accepted', async (data: { token: string; workerId: string }) => {
   console.log('[Call] Worker accepted:', data.token)
   callStatus.value.set(data.token, 'connected')
@@ -331,6 +415,36 @@ function handleAuth() {
 </script>
 
 <template>
+  <!-- Incoming call from worker modal -->
+  <div
+    v-if="incomingWorkerCall"
+    class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+  >
+    <div class="bg-gray-800 rounded-xl shadow-2xl p-8 max-w-sm w-full text-center">
+      <div class="w-20 h-20 bg-green-900 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
+        <svg class="w-10 h-10 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+        </svg>
+      </div>
+      <h3 class="text-xl font-bold text-white mb-2">Incoming Call</h3>
+      <p class="text-gray-300 mb-6">{{ incomingWorkerCall.workerName }} is calling you</p>
+      <div class="flex gap-4 justify-center">
+        <button
+          @click="rejectWorkerCall"
+          class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition"
+        >
+          Decline
+        </button>
+        <button
+          @click="acceptWorkerCall"
+          class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition"
+        >
+          Accept
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Auth gate -->
   <div
     v-if="!isAuthenticated"

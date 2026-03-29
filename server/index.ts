@@ -127,7 +127,7 @@ io.on('connection', (socket) => {
     io.to('dashboard').emit('session-left', { token: data.token })
   })
 
-  // Voice call signaling
+  // Voice call signaling - Dashboard calling worker
   socket.on('call-request', (data: { token: string }) => {
     const session = activeSessions.get(data.token)
     if (session) {
@@ -136,6 +136,30 @@ io.on('connection', (socket) => {
         callerId: socket.id,
       })
     }
+  })
+
+  // Voice call signaling - Worker calling dashboard
+  socket.on('worker-call-admin', (data: { token: string; workerName: string }) => {
+    console.log(`[Call] Worker ${data.token} (${data.workerName}) calling dashboard`)
+    // Notify all dashboard viewers
+    io.to('dashboard').emit('worker-calling', {
+      token: data.token,
+      workerName: data.workerName,
+      workerId: socket.id,
+    })
+  })
+
+  socket.on('admin-accept-call', (data: { workerId: string; token: string }) => {
+    console.log(`[Call] Admin accepted call from worker ${data.token}`)
+    io.to(data.workerId).emit('admin-accepted', {
+      adminId: socket.id,
+      token: data.token,
+    })
+  })
+
+  socket.on('admin-reject-call', (data: { workerId: string; token: string }) => {
+    console.log(`[Call] Admin rejected call from worker ${data.token}`)
+    io.to(data.workerId).emit('admin-rejected', { token: data.token })
   })
 
   socket.on('call-accepted', (data: { callerId: string; token: string }) => {
