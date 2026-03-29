@@ -15,7 +15,10 @@ import type { ShareStatus } from '@/lib/types'
 
 const route = useRoute()
 const token = computed(() => route.params.token as string)
-const name = computed(() => (route.query.name as string) || '')
+
+// Worker name - required before sharing
+const workerName = ref((route.query.name as string) || '')
+const nameError = ref('')
 
 const status = ref<ShareStatus>('idle')
 const errorMessage = ref('')
@@ -54,6 +57,13 @@ const statusColor = computed(() => {
 })
 
 async function startSharing() {
+  // Validate name
+  if (!workerName.value.trim()) {
+    nameError.value = 'Please enter your name'
+    return
+  }
+  nameError.value = ''
+
   try {
     status.value = 'requesting'
     errorMessage.value = ''
@@ -76,7 +86,7 @@ async function startSharing() {
 
     // Connect to signaling server
     connectSocket()
-    socket.emit('join-share', { token: token.value, name: name.value })
+    socket.emit('join-share', { token: token.value, name: workerName.value.trim() })
   } catch (err: unknown) {
     status.value = 'error'
     if (err instanceof Error) {
@@ -193,9 +203,25 @@ onUnmounted(() => {
 
       <!-- Main content -->
       <div v-else>
+        <!-- Name input -->
+        <div class="mb-6">
+          <label for="worker-name" class="block text-sm font-medium text-gray-700 mb-2">
+            Your Name <span class="text-red-500">*</span>
+          </label>
+          <input
+            id="worker-name"
+            v-model="workerName"
+            type="text"
+            placeholder="Enter your name"
+            :disabled="status === 'sharing'"
+            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500"
+          />
+          <p v-if="nameError" class="text-red-500 text-sm mt-1">{{ nameError }}</p>
+        </div>
+
         <!-- Instructions -->
         <p class="text-gray-600 text-center mb-6">
-          Click the button below and select the screen or window you want to share.
+          Enter your name and click the button below to share your screen.
         </p>
 
         <!-- Video preview -->
