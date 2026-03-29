@@ -2,13 +2,95 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
+import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db'
+import { generateToken, requireAuth, verifySocketToken } from './middleware/auth'
 
 const app = express()
 app.use(cors())
+app.use(express.json())
 
 // Health check endpoint
 app.get('/health', (_, res) => {
   res.json({ status: 'ok' })
+})
+
+// Auth API endpoints
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password } = req.body
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' })
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' })
+    }
+
+    const admin = await createAdmin(email, password)
+    const token = generateToken(admin)
+
+    res.json({
+      token,
+      admin: {
+        id: admin.id,
+        email: admin.email,
+        shareToken: admin.share_token,
+      },
+    })
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Email already registered') {
+      return res.status(409).json({ error: error.message })
+    }
+    console.error('[Auth] Register error:', error)
+    res.status(500).json({ error: 'Registration failed' })
+  }
+})
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' })
+    }
+
+    const admin = await verifyAdmin(email, password)
+    if (!admin) {
+      return res.status(401).json({ error: 'Invalid email or password' })
+    }
+
+    const token = generateToken(admin)
+
+    res.json({
+      token,
+      admin: {
+        id: admin.id,
+        email: admin.email,
+        shareToken: admin.share_token,
+      },
+    })
+  } catch (error) {
+    console.error('[Auth] Login error:', error)
+    res.status(500).json({ error: 'Login failed' })
+  }
+})
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({
+    admin: {
+      id: req.admin!.id,
+      email: req.admin!.email,
+      shareToken: req.admin!.share_token,
+    },
+  })
+})
+
+// Validate share token endpoint (for workers to check if link is valid)
+app.get('/api/share/:token/validate', (req, res) => {
+  const { token } = req.params
+  const valid = isValidShareToken(token)
+  res.json({ valid })
 })
 
 const httpServer = createServer(app)
@@ -23,8 +105,10 @@ const io = new Server(httpServer, {
   },
 })
 
+// Session now keyed by socket.id to allow multiple workers per share token
 interface ShareSession {
-  token: string
+  shareToken: string // The admin's share token (for filtering)
+  sessionId: string // Unique session ID (socket.id)
   name: string
   socketId: string
   startedAt: Date
@@ -32,10 +116,29 @@ interface ShareSession {
 
 interface DashboardViewer {
   socketId: string
+  shareToken: string // The admin's share token (to filter which sessions they see)
 }
 
+// Key: socket.id, Value: session data
 const activeSessions = new Map<string, ShareSession>()
+// Key: socket.id, Value: viewer data
 const dashboardViewers = new Map<string, DashboardViewer>()
+
+// Get all sessions for a specific admin's share token
+function getSessionsForToken(shareToken: string): ShareSession[] {
+  const sessions: ShareSession[] = []
+  for (const session of activeSessions.values()) {
+    if (session.shareToken === shareToken) {
+      sessions.push(session)
+    }
+  }
+  return sessions
+}
+
+// Get session by socket ID
+function getSessionBySocketId(socketId: string): ShareSession | undefined {
+  return activeSessions.get(socketId)
+}
 
 io.on('connection', (socket) => {
   console.log(`[Socket] Connected: ${socket.id}`)
@@ -45,48 +148,78 @@ io.on('connection', (socket) => {
     const { token, name } = data
     console.log(`[Share] Worker joining: ${token} (${name || 'unnamed'})`)
 
-    // Store session
+    // Validate token against database
+    if (!isValidShareToken(token)) {
+      console.log(`[Share] Invalid token: ${token}`)
+      socket.emit('share-error', { error: 'Invalid share link' })
+      return
+    }
+
+    // Generate unique session ID (using socket.id)
+    const sessionId = socket.id
+
+    // Store session - keyed by socket.id to allow multiple workers per token
     const session: ShareSession = {
-      token,
-      name: name || `Worker ${token.slice(0, 6)}`,
+      shareToken: token,
+      sessionId,
+      name: name || `Worker ${sessionId.slice(0, 6)}`,
       socketId: socket.id,
       startedAt: new Date(),
     }
-    activeSessions.set(token, session)
+    activeSessions.set(socket.id, session)
 
-    // Join room for this token
+    // Join room for this share token (for signaling)
     socket.join(`share:${token}`)
 
-    // Notify all dashboard viewers about new session
-    io.to('dashboard').emit('session-joined', {
-      token,
-      name: session.name,
-      startedAt: session.startedAt,
-    })
+    // Notify dashboard viewers who are watching this admin's share token
+    for (const [viewerSocketId, viewer] of dashboardViewers) {
+      if (viewer.shareToken === token) {
+        io.to(viewerSocketId).emit('session-joined', {
+          sessionId,
+          token,
+          name: session.name,
+          startedAt: session.startedAt,
+        })
+      }
+    }
 
-    socket.emit('share-ready', { token })
+    socket.emit('share-ready', { token, sessionId })
   })
 
-  // Dashboard viewer joins
-  socket.on('join-dashboard', () => {
-    console.log(`[Dashboard] Viewer joined: ${socket.id}`)
-    socket.join('dashboard')
-    dashboardViewers.set(socket.id, { socketId: socket.id })
+  // Dashboard viewer joins - now requires JWT auth
+  socket.on('join-dashboard', (data: { token: string }) => {
+    const { token: jwtToken } = data
 
-    // Send current active sessions
-    const sessions = Array.from(activeSessions.values()).map((s) => ({
-      token: s.token,
+    // Verify JWT
+    const admin = verifySocketToken(jwtToken)
+    if (!admin) {
+      console.log(`[Dashboard] Invalid auth token for ${socket.id}`)
+      socket.emit('dashboard-error', { error: 'Authentication required' })
+      return
+    }
+
+    console.log(`[Dashboard] Viewer joined: ${socket.id} (admin: ${admin.email})`)
+    socket.join('dashboard')
+    dashboardViewers.set(socket.id, {
+      socketId: socket.id,
+      shareToken: admin.share_token,
+    })
+
+    // Send only sessions for this admin's share token
+    const sessions = getSessionsForToken(admin.share_token).map((s) => ({
+      sessionId: s.sessionId,
+      token: s.shareToken,
       name: s.name,
       startedAt: s.startedAt,
     }))
     socket.emit('active-sessions', sessions)
   })
 
-  // Dashboard requests to view a specific share
-  socket.on('request-offer', (data: { token: string }) => {
-    const session = activeSessions.get(data.token)
+  // Dashboard requests to view a specific share (now uses sessionId)
+  socket.on('request-offer', (data: { sessionId: string }) => {
+    const session = activeSessions.get(data.sessionId)
     if (session) {
-      console.log(`[Signal] Dashboard requesting offer from ${data.token}`)
+      console.log(`[Signal] Dashboard requesting offer from session ${data.sessionId}`)
       io.to(session.socketId).emit('viewer-joined', {
         viewerId: socket.id,
       })
@@ -95,11 +228,13 @@ io.on('connection', (socket) => {
 
   // WebRTC signaling: offer from sharer to viewer
   socket.on('offer', (data: { viewerId: string; offer: RTCSessionDescriptionInit }) => {
+    const session = getSessionBySocketId(socket.id)
     console.log(`[Signal] Offer from ${socket.id} to ${data.viewerId}`)
     io.to(data.viewerId).emit('offer', {
       sharerId: socket.id,
       offer: data.offer,
-      token: getTokenBySocketId(socket.id),
+      sessionId: session?.sessionId,
+      token: session?.shareToken,
     })
   })
 
@@ -122,16 +257,25 @@ io.on('connection', (socket) => {
 
   // Worker stops sharing
   socket.on('share-stopped', (data: { token: string }) => {
-    console.log(`[Share] Stopped: ${data.token}`)
-    activeSessions.delete(data.token)
-    io.to('dashboard').emit('session-left', { token: data.token })
+    const session = getSessionBySocketId(socket.id)
+    if (session) {
+      console.log(`[Share] Stopped: session ${session.sessionId}`)
+      activeSessions.delete(socket.id)
+
+      // Notify relevant dashboard viewers
+      for (const [viewerSocketId, viewer] of dashboardViewers) {
+        if (viewer.shareToken === session.shareToken) {
+          io.to(viewerSocketId).emit('session-left', { sessionId: session.sessionId })
+        }
+      }
+    }
   })
 
-  // Voice call signaling - Dashboard calling worker
-  socket.on('call-request', (data: { token: string }) => {
-    const session = activeSessions.get(data.token)
+  // Voice call signaling - Dashboard calling worker (now uses sessionId)
+  socket.on('call-request', (data: { sessionId: string }) => {
+    const session = activeSessions.get(data.sessionId)
     if (session) {
-      console.log(`[Call] Dashboard requesting call with ${data.token}`)
+      console.log(`[Call] Dashboard requesting call with session ${data.sessionId}`)
       io.to(session.socketId).emit('call-incoming', {
         callerId: socket.id,
       })
@@ -140,13 +284,20 @@ io.on('connection', (socket) => {
 
   // Voice call signaling - Worker calling dashboard
   socket.on('worker-call-admin', (data: { token: string; workerName: string }) => {
+    const session = getSessionBySocketId(socket.id)
     console.log(`[Call] Worker ${data.token} (${data.workerName}) calling dashboard`)
-    // Notify all dashboard viewers
-    io.to('dashboard').emit('worker-calling', {
-      token: data.token,
-      workerName: data.workerName,
-      workerId: socket.id,
-    })
+
+    // Notify only dashboard viewers watching this admin's share token
+    for (const [viewerSocketId, viewer] of dashboardViewers) {
+      if (viewer.shareToken === data.token) {
+        io.to(viewerSocketId).emit('worker-calling', {
+          sessionId: session?.sessionId,
+          token: data.token,
+          workerName: data.workerName,
+          workerId: socket.id,
+        })
+      }
+    }
   })
 
   socket.on('admin-accept-call', (data: { workerId: string; token: string }) => {
@@ -212,25 +363,22 @@ io.on('connection', (socket) => {
     console.log(`[Socket] Disconnected: ${socket.id}`)
 
     // Check if this was a sharer
-    const token = getTokenBySocketId(socket.id)
-    if (token) {
-      activeSessions.delete(token)
-      io.to('dashboard').emit('session-left', { token })
+    const session = getSessionBySocketId(socket.id)
+    if (session) {
+      activeSessions.delete(socket.id)
+
+      // Notify relevant dashboard viewers
+      for (const [viewerSocketId, viewer] of dashboardViewers) {
+        if (viewer.shareToken === session.shareToken) {
+          io.to(viewerSocketId).emit('session-left', { sessionId: session.sessionId })
+        }
+      }
     }
 
     // Remove from dashboard viewers
     dashboardViewers.delete(socket.id)
   })
 })
-
-function getTokenBySocketId(socketId: string): string | undefined {
-  for (const [token, session] of activeSessions) {
-    if (session.socketId === socketId) {
-      return token
-    }
-  }
-  return undefined
-}
 
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {

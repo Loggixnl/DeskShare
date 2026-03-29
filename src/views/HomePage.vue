@@ -1,31 +1,21 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { isAuthenticated, currentAdmin, getShareUrl } from '@/lib/auth'
 
 const router = useRouter()
-const generatedToken = ref('')
-const copied = ref(false)
 
 const shareLink = computed(() => {
-  if (!generatedToken.value) return ''
-  return `${window.location.origin}/share/${generatedToken.value}`
+  if (!currentAdmin.value) return ''
+  return getShareUrl(currentAdmin.value.shareToken)
 })
 
-function generateToken(): string {
-  return Math.random().toString(36).substring(2, 15)
+function goToLogin() {
+  router.push('/login')
 }
 
-function createShareLink() {
-  generatedToken.value = generateToken()
-  copied.value = false
-}
-
-async function copyLink() {
-  await navigator.clipboard.writeText(shareLink.value)
-  copied.value = true
-  setTimeout(() => {
-    copied.value = false
-  }, 2000)
+function goToRegister() {
+  router.push('/register')
 }
 
 function goToDashboard() {
@@ -36,64 +26,68 @@ function goToDashboard() {
 <template>
   <div class="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-8">
     <h1 class="text-4xl font-bold mb-2">DeskShare</h1>
-    <p class="text-gray-400 mb-8">Simple one-way screen sharing</p>
+    <p class="text-gray-400 mb-8">Simple one-way screen sharing for teams</p>
 
     <div class="space-y-4 w-full max-w-md">
-      <button
-        @click="createShareLink"
-        class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition"
-      >
-        Generate Share Link
-      </button>
+      <!-- Authenticated user -->
+      <template v-if="isAuthenticated">
+        <div class="bg-gray-800 rounded-lg p-4 text-center">
+          <p class="text-gray-400 text-sm mb-2">Welcome back!</p>
+          <p class="text-white font-medium">{{ currentAdmin?.email }}</p>
+        </div>
 
-      <div v-if="generatedToken" class="bg-gray-800 rounded-lg p-4 animate-fade-in">
-        <p class="text-sm text-gray-400 mb-2">Share this link with the worker:</p>
-        <div class="flex gap-2">
-          <input
-            type="text"
-            readonly
-            :value="shareLink"
-            class="flex-1 bg-gray-700 text-white px-3 py-2 rounded text-sm font-mono"
-          />
-          <button
-            @click="copyLink"
-            :class="[
-              'px-4 py-2 rounded text-sm transition min-w-[70px]',
-              copied
-                ? 'bg-green-600 text-white'
-                : 'bg-gray-600 hover:bg-gray-500 text-white'
-            ]"
-          >
-            {{ copied ? 'Copied!' : 'Copy' }}
-          </button>
+        <button
+          @click="goToDashboard"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+        >
+          Go to Dashboard
+        </button>
+      </template>
+
+      <!-- Not authenticated -->
+      <template v-else>
+        <div class="bg-gray-800 rounded-lg p-6">
+          <h2 class="text-lg font-semibold mb-4 text-center">Get Started</h2>
+          <p class="text-gray-400 text-sm mb-4 text-center">
+            Create an account to get your permanent share link, or sign in to access your dashboard.
+          </p>
+
+          <div class="space-y-3">
+            <button
+              @click="goToRegister"
+              class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+            >
+              Create Account
+            </button>
+
+            <button
+              @click="goToLogin"
+              class="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition"
+            >
+              Sign In
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Features -->
+      <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+        <div class="bg-gray-800/50 rounded-lg p-4">
+          <div class="text-2xl mb-2">🔗</div>
+          <h3 class="font-medium mb-1">Permanent Link</h3>
+          <p class="text-gray-400 text-sm">One link that never changes</p>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-4">
+          <div class="text-2xl mb-2">👥</div>
+          <h3 class="font-medium mb-1">Multiple Workers</h3>
+          <p class="text-gray-400 text-sm">Many screens, one dashboard</p>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-4">
+          <div class="text-2xl mb-2">🎙️</div>
+          <h3 class="font-medium mb-1">Voice Calls</h3>
+          <p class="text-gray-400 text-sm">Two-way communication</p>
         </div>
       </div>
-
-      <hr class="border-gray-700" />
-
-      <button
-        @click="goToDashboard"
-        class="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition"
-      >
-        Open Dashboard
-      </button>
     </div>
   </div>
 </template>
-
-<style scoped>
-.animate-fade-in {
-  animation: fadeIn 0.2s ease-out;
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-</style>

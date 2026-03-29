@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { getSocket, connectSocket, disconnectSocket } from '@/lib/socket'
+import { validateShareToken } from '@/lib/auth'
 import {
   createPeerConnection,
   createOffer,
@@ -161,6 +162,19 @@ function playRingtone() {
 }
 
 const socket = getSocket()
+
+// Handle share errors from server (e.g., invalid token)
+socket.on('share-error', (data: { error: string }) => {
+  console.error('[Share] Error:', data.error)
+  status.value = 'error'
+  errorMessage.value = data.error
+
+  // Clean up if we were sharing
+  if (localStream.value) {
+    stopMediaStream(localStream.value)
+    localStream.value = null
+  }
+})
 
 const statusText = computed(() => {
   switch (status.value) {
@@ -438,12 +452,25 @@ socket.on('admin-rejected', () => {
   callStatus.value = 'idle'
 })
 
-onMounted(() => {
+// Token validation state
+const isValidating = ref(true)
+
+onMounted(async () => {
   // Validate token exists
   if (!token.value) {
     status.value = 'error'
     errorMessage.value = 'Invalid share link'
+    isValidating.value = false
+    return
   }
+
+  // Validate token against server
+  const valid = await validateShareToken(token.value)
+  if (!valid) {
+    status.value = 'error'
+    errorMessage.value = 'This share link is invalid or has expired'
+  }
+  isValidating.value = false
 })
 
 onUnmounted(() => {
@@ -493,11 +520,16 @@ onUnmounted(() => {
         <p class="text-gray-500 text-sm">Screen Sharing</p>
       </div>
 
+      <!-- Validating state -->
+      <div v-if="isValidating" class="text-center py-8">
+        <div class="text-gray-500">Validating share link...</div>
+      </div>
+
       <!-- Error state -->
-      <div v-if="status === 'error' && !localStream" class="text-center py-8">
+      <div v-else-if="status === 'error' && !localStream" class="text-center py-8">
         <div class="text-red-500 text-lg mb-4">{{ errorMessage }}</div>
         <button
-          v-if="errorMessage !== 'Invalid share link'"
+          v-if="!errorMessage.includes('invalid') && !errorMessage.includes('Invalid') && !errorMessage.includes('expired')"
           @click="status = 'idle'"
           class="text-blue-600 hover:underline"
         >

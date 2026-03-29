@@ -8,9 +8,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'focus', token: string): void
-  (e: 'call', token: string): void
-  (e: 'hangup', token: string): void
+  (e: 'focus', sessionId: string): void
+  (e: 'call', sessionId: string): void
+  (e: 'hangup', sessionId: string): void
 }>()
 
 const videoElement = ref<HTMLVideoElement | null>(null)
@@ -78,7 +78,7 @@ onUnmounted(() => {
 
       <!-- Focus button (shows on hover) -->
       <button
-        @click="emit('focus', session.token)"
+        @click="emit('focus', session.sessionId || session.token)"
         class="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white p-2 rounded opacity-0 group-hover:opacity-100 transition"
       >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -102,7 +102,7 @@ onUnmounted(() => {
         <!-- Call button -->
         <button
           v-if="callStatus !== 'connected'"
-          @click.stop="emit('call', session.token)"
+          @click.stop="emit('call', session.sessionId || session.token)"
           :disabled="callStatus === 'calling'"
           :class="[
             'p-1.5 rounded-full transition',
@@ -119,7 +119,7 @@ onUnmounted(() => {
         <!-- Hangup button (when connected) -->
         <button
           v-else
-          @click.stop="emit('hangup', session.token)"
+          @click.stop="emit('hangup', session.sessionId || session.token)"
           class="p-1.5 rounded-full bg-red-600 hover:bg-red-700 transition animate-pulse"
           title="End call"
         >

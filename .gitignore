@@ -24,3 +24,9 @@ npm-debug.log*
 # TypeScript
 *.tsbuildinfo
 .vercel
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm
