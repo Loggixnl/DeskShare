@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
+import { createAdmin, verifyAdmin, isValidShareToken, getAdminById, setWorkerDashboardEnabled, getWorkerDashboardEnabled, setMediaType, getMediaType } from './db.js'
 import { generateToken, requireAuth, verifySocketToken } from './middleware/auth.js'
 
 const app = express()
@@ -121,6 +121,70 @@ app.get('/api/share/:token/validate', async (req, res) => {
   res.json({ valid })
 })
 
+// Get worker dashboard enabled status for a share token (for workers)
+app.get('/api/share/:token/dashboard-enabled', async (req, res) => {
+  const { token } = req.params
+  const enabled = await getWorkerDashboardEnabled(token)
+  res.json({ enabled })
+})
+
+// Admin toggle worker dashboard setting
+app.put('/api/admin/worker-dashboard', requireAuth, async (req, res) => {
+  try {
+    const { enabled } = req.body
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' })
+    }
+
+    await setWorkerDashboardEnabled(req.admin!.id, enabled)
+
+    // Notify all connected workers with this admin's share token
+    const shareToken = req.admin!.share_token
+    for (const [socketId, session] of activeSessions) {
+      if (session.shareToken === shareToken) {
+        io.to(socketId).emit('worker-dashboard-changed', { enabled })
+      }
+    }
+
+    res.json({ success: true, enabled })
+  } catch (error) {
+    console.error('[Admin] Worker dashboard toggle error:', error)
+    res.status(500).json({ error: 'Failed to update setting' })
+  }
+})
+
+// Get media type for a share token (for workers)
+app.get('/api/share/:token/media-type', async (req, res) => {
+  const { token } = req.params
+  const mediaType = await getMediaType(token)
+  res.json({ mediaType })
+})
+
+// Admin set media type (screen or webcam)
+app.put('/api/admin/media-type', requireAuth, async (req, res) => {
+  try {
+    const { mediaType } = req.body
+    if (mediaType !== 'screen' && mediaType !== 'webcam') {
+      return res.status(400).json({ error: 'mediaType must be "screen" or "webcam"' })
+    }
+
+    await setMediaType(req.admin!.id, mediaType)
+
+    // Notify all connected workers with this admin's share token
+    const shareToken = req.admin!.share_token
+    for (const [socketId, session] of activeSessions) {
+      if (session.shareToken === shareToken) {
+        io.to(socketId).emit('media-type-changed', { mediaType })
+      }
+    }
+
+    res.json({ success: true, mediaType })
+  } catch (error) {
+    console.error('[Admin] Media type change error:', error)
+    res.status(500).json({ error: 'Failed to update media type' })
+  }
+})
+
 const httpServer = createServer(app)
 
 const io = new Server(httpServer, {
@@ -201,6 +265,18 @@ io.on('connection', (socket) => {
     for (const [viewerSocketId, viewer] of dashboardViewers) {
       if (viewer.shareToken === token) {
         io.to(viewerSocketId).emit('session-joined', {
+          sessionId,
+          token,
+          name: session.name,
+          startedAt: session.startedAt,
+        })
+      }
+    }
+
+    // Notify other workers for worker dashboard (if enabled)
+    for (const [otherSocketId, otherSession] of activeSessions) {
+      if (otherSession.shareToken === token && otherSocketId !== socket.id) {
+        io.to(otherSocketId).emit('worker-session-joined', {
           sessionId,
           token,
           name: session.name,
@@ -395,6 +471,80 @@ io.on('connection', (socket) => {
     })
   })
 
+  // Worker Dashboard - worker requests to view other workers' streams
+  socket.on('join-worker-dashboard', async (data: { token: string }) => {
+    const session = getSessionBySocketId(socket.id)
+    if (!session) {
+      console.log(`[Worker Dashboard] Worker ${socket.id} not in a session`)
+      return
+    }
+
+    // Check if worker dashboard is enabled for this admin
+    const enabled = await getWorkerDashboardEnabled(data.token)
+    if (!enabled) {
+      console.log(`[Worker Dashboard] Worker dashboard not enabled for token ${data.token}`)
+      socket.emit('worker-dashboard-sessions', [])
+      return
+    }
+
+    // Get all other sessions for this share token (excluding the requesting worker)
+    // Limit to 10 sessions max to prevent O(N²) connection explosion
+    const otherSessions = getSessionsForToken(data.token)
+      .filter((s) => s.socketId !== socket.id)
+      .slice(0, 10)
+      .map((s) => ({
+        sessionId: s.sessionId,
+        token: s.shareToken,
+        name: s.name,
+        startedAt: s.startedAt,
+      }))
+
+    console.log(`[Worker Dashboard] Sending ${otherSessions.length} sessions to worker ${socket.id}`)
+    socket.emit('worker-dashboard-sessions', otherSessions)
+  })
+
+  // Worker requests offer from another worker
+  socket.on('worker-request-offer', (data: { targetSessionId: string }) => {
+    const targetSession = activeSessions.get(data.targetSessionId)
+    const requestingSession = getSessionBySocketId(socket.id)
+
+    if (targetSession && requestingSession && targetSession.shareToken === requestingSession.shareToken) {
+      console.log(`[Worker Dashboard] Worker ${socket.id} requesting offer from ${data.targetSessionId}`)
+      io.to(targetSession.socketId).emit('worker-viewer-joined', {
+        viewerId: socket.id,
+      })
+    }
+  })
+
+  // Worker-to-worker WebRTC signaling: offer
+  socket.on('worker-offer', (data: { viewerId: string; offer: RTCSessionDescriptionInit }) => {
+    const session = getSessionBySocketId(socket.id)
+    console.log(`[Worker Signal] Offer from ${socket.id} to ${data.viewerId}`)
+    io.to(data.viewerId).emit('worker-offer', {
+      sharerId: socket.id,
+      offer: data.offer,
+      sessionId: session?.sessionId,
+      token: session?.shareToken,
+    })
+  })
+
+  // Worker-to-worker WebRTC signaling: answer
+  socket.on('worker-answer', (data: { sharerId: string; answer: RTCSessionDescriptionInit }) => {
+    console.log(`[Worker Signal] Answer from ${socket.id} to ${data.sharerId}`)
+    io.to(data.sharerId).emit('worker-answer', {
+      viewerId: socket.id,
+      answer: data.answer,
+    })
+  })
+
+  // Worker-to-worker ICE candidate exchange
+  socket.on('worker-ice-candidate', (data: { targetId: string; candidate: RTCIceCandidateInit }) => {
+    io.to(data.targetId).emit('worker-ice-candidate', {
+      fromId: socket.id,
+      candidate: data.candidate,
+    })
+  })
+
   // Handle disconnect
   socket.on('disconnect', () => {
     console.log(`[Socket] Disconnected: ${socket.id}`)
@@ -408,6 +558,13 @@ io.on('connection', (socket) => {
       for (const [viewerSocketId, viewer] of dashboardViewers) {
         if (viewer.shareToken === session.shareToken) {
           io.to(viewerSocketId).emit('session-left', { sessionId: session.sessionId })
+        }
+      }
+
+      // Notify other workers viewing this session (worker dashboard)
+      for (const [otherSocketId, otherSession] of activeSessions) {
+        if (otherSession.shareToken === session.shareToken) {
+          io.to(otherSocketId).emit('worker-session-left', { sessionId: session.sessionId })
         }
       }
     }

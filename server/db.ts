@@ -16,20 +16,43 @@ async function initializeDatabase() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       share_token TEXT UNIQUE NOT NULL,
+      worker_dashboard_enabled INTEGER DEFAULT 0,
+      media_type TEXT DEFAULT 'screen',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `)
+
+  // Migration: add worker_dashboard_enabled column if it doesn't exist
+  try {
+    await db.execute(`ALTER TABLE admins ADD COLUMN worker_dashboard_enabled INTEGER DEFAULT 0`)
+    console.log('[DB] Added worker_dashboard_enabled column')
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // Migration: add media_type column if it doesn't exist
+  try {
+    await db.execute(`ALTER TABLE admins ADD COLUMN media_type TEXT DEFAULT 'screen'`)
+    console.log('[DB] Added media_type column')
+  } catch {
+    // Column already exists, ignore
+  }
+
   console.log('[DB] Database initialized')
 }
 
 // Initialize on module load
 initializeDatabase().catch(console.error)
 
+export type MediaType = 'screen' | 'webcam'
+
 export interface Admin {
   id: number
   email: string
   password_hash: string
   share_token: string
+  worker_dashboard_enabled: number
+  media_type: MediaType
   created_at: string
 }
 
@@ -37,6 +60,8 @@ export interface AdminPublic {
   id: number
   email: string
   share_token: string
+  worker_dashboard_enabled: boolean
+  media_type: MediaType
   created_at: string
 }
 
@@ -82,6 +107,8 @@ export async function createAdmin(
     id: Number(result.lastInsertRowid),
     email,
     share_token: shareToken,
+    worker_dashboard_enabled: false,
+    media_type: 'screen' as MediaType,
     created_at: new Date().toISOString(),
   }
 }
@@ -110,6 +137,8 @@ export async function verifyAdmin(
     id: admin.id,
     email: admin.email,
     share_token: admin.share_token,
+    worker_dashboard_enabled: !!admin.worker_dashboard_enabled,
+    media_type: (admin.media_type || 'screen') as MediaType,
     created_at: admin.created_at,
   }
 }
@@ -130,6 +159,8 @@ export async function getAdminById(id: number): Promise<AdminPublic | null> {
     id: admin.id,
     email: admin.email,
     share_token: admin.share_token,
+    worker_dashboard_enabled: !!admin.worker_dashboard_enabled,
+    media_type: (admin.media_type || 'screen') as MediaType,
     created_at: admin.created_at,
   }
 }
@@ -159,8 +190,60 @@ export async function getAdminByShareToken(token: string): Promise<AdminPublic |
     id: admin.id,
     email: admin.email,
     share_token: admin.share_token,
+    worker_dashboard_enabled: !!admin.worker_dashboard_enabled,
+    media_type: (admin.media_type || 'screen') as MediaType,
     created_at: admin.created_at,
   }
+}
+
+// Set worker dashboard enabled for an admin
+export async function setWorkerDashboardEnabled(
+  adminId: number,
+  enabled: boolean
+): Promise<void> {
+  await db.execute({
+    sql: 'UPDATE admins SET worker_dashboard_enabled = ? WHERE id = ?',
+    args: [enabled ? 1 : 0, adminId],
+  })
+}
+
+// Set media type for an admin (controls what workers share)
+export async function setMediaType(
+  adminId: number,
+  mediaType: MediaType
+): Promise<void> {
+  await db.execute({
+    sql: 'UPDATE admins SET media_type = ? WHERE id = ?',
+    args: [mediaType, adminId],
+  })
+}
+
+// Get media type by share token (for workers)
+export async function getMediaType(shareToken: string): Promise<MediaType> {
+  const result = await db.execute({
+    sql: 'SELECT media_type FROM admins WHERE share_token = ?',
+    args: [shareToken],
+  })
+
+  if (result.rows.length === 0) {
+    return 'screen'
+  }
+
+  return ((result.rows[0] as unknown as { media_type: string }).media_type || 'screen') as MediaType
+}
+
+// Get worker dashboard enabled status by share token (for workers to check)
+export async function getWorkerDashboardEnabled(shareToken: string): Promise<boolean> {
+  const result = await db.execute({
+    sql: 'SELECT worker_dashboard_enabled FROM admins WHERE share_token = ?',
+    args: [shareToken],
+  })
+
+  if (result.rows.length === 0) {
+    return false
+  }
+
+  return !!(result.rows[0] as unknown as { worker_dashboard_enabled: number }).worker_dashboard_enabled
 }
 
 export default db

@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { getSocket, connectSocket, disconnectSocket } from '@/lib/socket'
-import { validateShareToken } from '@/lib/auth'
+import { validateShareToken, getWorkerDashboardEnabled, getMediaType } from '@/lib/auth'
 import {
   createPeerConnection,
   createOffer,
@@ -11,6 +11,8 @@ import {
   addIceCandidate,
   closePeerConnection,
   getDisplayMedia,
+  getUserMediaVideo,
+  replaceVideoTrack,
   stopMediaStream,
 } from '@/lib/webrtc'
 import type { ShareStatus } from '@/lib/types'
@@ -27,6 +29,9 @@ const errorMessage = ref('')
 const localStream = ref<MediaStream | null>(null)
 const videoElement = ref<HTMLVideoElement | null>(null)
 
+// Media type toggle: screen share or webcam
+const mediaType = ref<'screen' | 'webcam'>('screen')
+
 // Track peer connections to dashboard viewers
 const peerConnections = new Map<string, RTCPeerConnection>()
 
@@ -37,6 +42,42 @@ const voicePeerConnection = ref<RTCPeerConnection | null>(null)
 const localAudioStream = ref<MediaStream | null>(null)
 const remoteAudio = ref<HTMLAudioElement | null>(null)
 const currentCallerId = ref<string | null>(null)
+
+// Worker Dashboard state - view other workers' screens
+interface WorkerSession {
+  sessionId: string
+  token: string
+  name: string
+  startedAt: Date
+  stream?: MediaStream
+}
+const workerDashboardEnabled = ref(false)
+const workerSessions = ref<Map<string, WorkerSession>>(new Map())
+const workerPeerConnections = new Map<string, RTCPeerConnection>()
+const workerSharerIdToSessionId = new Map<string, string>()
+
+const workerSessionList = computed(() => Array.from(workerSessions.value.values()))
+
+// Custom directive to set video srcObject
+const vSrcObject = {
+  mounted: (el: HTMLVideoElement, binding: { value: MediaStream | null }) => {
+    if (binding.value) {
+      el.srcObject = binding.value
+      el.play().catch(() => {})
+    }
+  },
+  updated: (el: HTMLVideoElement, binding: { value: MediaStream | null }) => {
+    if (el.srcObject !== binding.value) {
+      el.srcObject = binding.value
+      if (binding.value) {
+        el.play().catch(() => {})
+      }
+    }
+  },
+  unmounted: (el: HTMLVideoElement) => {
+    el.srcObject = null
+  },
+}
 
 // Worker calling admin
 async function callAdmin() {
@@ -215,8 +256,14 @@ async function startSharing() {
     status.value = 'requesting'
     errorMessage.value = ''
 
-    // Get screen share stream
-    const stream = await getDisplayMedia()
+    // Check what media type admin wants workers to use
+    const adminMediaType = await getMediaType(token.value)
+    mediaType.value = adminMediaType
+
+    // Get the appropriate stream based on admin setting
+    const stream = adminMediaType === 'webcam'
+      ? await getUserMediaVideo()
+      : await getDisplayMedia()
     localStream.value = stream
 
     // Show local preview
@@ -224,9 +271,11 @@ async function startSharing() {
       videoElement.value.srcObject = stream
     }
 
-    // Handle browser-native stop (user clicks browser stop button)
-    stream.getVideoTracks()[0].onended = () => {
-      stopSharing()
+    // Handle browser-native stop (user clicks browser stop button) - only for screen share
+    if (adminMediaType === 'screen') {
+      stream.getVideoTracks()[0].onended = () => {
+        stopSharing()
+      }
     }
 
     status.value = 'sharing'
@@ -237,6 +286,9 @@ async function startSharing() {
     // Connect to signaling server
     connectSocket()
     socket.emit('join-share', { token: token.value, name: workerName.value.trim() })
+
+    // Initialize worker dashboard (check if enabled and load other workers)
+    initWorkerDashboard()
   } catch (err: unknown) {
     status.value = 'error'
     if (err instanceof Error) {
@@ -245,6 +297,48 @@ async function startSharing() {
       } else {
         errorMessage.value = err.message
       }
+    }
+  }
+}
+
+async function switchMedia(type: 'screen' | 'webcam') {
+  if (type === mediaType.value || status.value !== 'sharing') return
+
+  try {
+    // Get new stream based on type
+    const newStream = type === 'screen'
+      ? await getDisplayMedia()
+      : await getUserMediaVideo()
+
+    // Stop old stream tracks
+    if (localStream.value) {
+      stopMediaStream(localStream.value)
+    }
+
+    // Update local stream and preview
+    localStream.value = newStream
+    if (videoElement.value) {
+      videoElement.value.srcObject = newStream
+    }
+
+    // Handle browser-native stop for screen share
+    if (type === 'screen') {
+      newStream.getVideoTracks()[0].onended = () => {
+        stopSharing()
+      }
+    }
+
+    // Replace track in all existing peer connections
+    const newTrack = newStream.getVideoTracks()[0]
+    for (const pc of peerConnections.values()) {
+      await replaceVideoTrack(pc, newTrack)
+    }
+
+    mediaType.value = type
+  } catch (err: unknown) {
+    console.error('Failed to switch media:', err)
+    if (err instanceof Error && err.name === 'NotAllowedError') {
+      errorMessage.value = 'Permission denied'
     }
   }
 }
@@ -260,6 +354,9 @@ function stopSharing() {
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
 
+  // Cleanup worker dashboard
+  cleanupWorkerDashboard()
+
   // Notify server
   socket.emit('share-stopped', { token: token.value })
 
@@ -269,6 +366,7 @@ function stopSharing() {
   }
 
   status.value = 'stopped'
+  mediaType.value = 'screen' // Reset to default
 }
 
 // Handle viewer joining - create offer for them
@@ -481,6 +579,168 @@ socket.on('admin-rejected', () => {
   callStatus.value = 'idle'
 })
 
+// Worker Dashboard - initialize when sharing starts
+async function initWorkerDashboard() {
+  const enabled = await getWorkerDashboardEnabled(token.value)
+  workerDashboardEnabled.value = enabled
+  if (enabled) {
+    socket.emit('join-worker-dashboard', { token: token.value })
+  }
+}
+
+function cleanupWorkerDashboard() {
+  workerPeerConnections.forEach((pc) => closePeerConnection(pc))
+  workerPeerConnections.clear()
+  workerSharerIdToSessionId.clear()
+  workerSessions.value.clear()
+}
+
+// Worker Dashboard socket handlers
+socket.on('worker-dashboard-sessions', (sessions: Array<{ sessionId: string; token: string; name: string; startedAt: string }>) => {
+  console.log('[Worker Dashboard] Received sessions:', sessions.length)
+  sessions.forEach((session) => {
+    workerSessions.value.set(session.sessionId, {
+      sessionId: session.sessionId,
+      token: session.token,
+      name: session.name,
+      startedAt: new Date(session.startedAt),
+    })
+    // Request offer from each worker
+    socket.emit('worker-request-offer', { targetSessionId: session.sessionId })
+  })
+})
+
+socket.on('worker-dashboard-changed', (data: { enabled: boolean }) => {
+  console.log('[Worker Dashboard] Setting changed:', data.enabled)
+  workerDashboardEnabled.value = data.enabled
+  if (data.enabled && status.value === 'sharing') {
+    socket.emit('join-worker-dashboard', { token: token.value })
+  } else if (!data.enabled) {
+    cleanupWorkerDashboard()
+  }
+})
+
+// Admin changed media type - switch automatically
+socket.on('media-type-changed', async (data: { mediaType: 'screen' | 'webcam' }) => {
+  console.log('[Media] Admin changed media type to:', data.mediaType)
+  if (status.value === 'sharing' && data.mediaType !== mediaType.value) {
+    await switchMedia(data.mediaType)
+  }
+})
+
+socket.on('worker-session-joined', (data: { sessionId: string; token: string; name: string; startedAt: string }) => {
+  if (!workerDashboardEnabled.value) return
+  console.log('[Worker Dashboard] New worker joined:', data.name)
+  workerSessions.value.set(data.sessionId, {
+    sessionId: data.sessionId,
+    token: data.token,
+    name: data.name,
+    startedAt: new Date(data.startedAt),
+  })
+  socket.emit('worker-request-offer', { targetSessionId: data.sessionId })
+})
+
+socket.on('worker-session-left', (data: { sessionId: string }) => {
+  console.log('[Worker Dashboard] Worker left:', data.sessionId)
+  workerSessions.value.delete(data.sessionId)
+  const pc = workerPeerConnections.get(data.sessionId)
+  if (pc) {
+    closePeerConnection(pc)
+    workerPeerConnections.delete(data.sessionId)
+  }
+})
+
+// Another worker viewing this worker's stream
+socket.on('worker-viewer-joined', async (data: { viewerId: string }) => {
+  if (!localStream.value) return
+  console.log('[Worker Dashboard] Worker viewer joined:', data.viewerId)
+
+  const pc = createPeerConnection({
+    onIceCandidate: (candidate) => {
+      socket.emit('worker-ice-candidate', {
+        targetId: data.viewerId,
+        candidate: candidate.toJSON(),
+      })
+    },
+  })
+
+  localStream.value.getTracks().forEach((track) => {
+    pc.addTrack(track, localStream.value!)
+  })
+
+  peerConnections.set(`worker-${data.viewerId}`, pc)
+
+  const offer = await createOffer(pc)
+  socket.emit('worker-offer', {
+    viewerId: data.viewerId,
+    offer,
+  })
+})
+
+// Receiving offer from another worker
+socket.on('worker-offer', async (data: { sharerId: string; offer: RTCSessionDescriptionInit; sessionId: string; token: string }) => {
+  console.log('[Worker Dashboard] Received offer from worker:', data.sessionId)
+  workerSharerIdToSessionId.set(data.sharerId, data.sessionId)
+
+  const pc = createPeerConnection({
+    onIceCandidate: (candidate) => {
+      socket.emit('worker-ice-candidate', {
+        targetId: data.sharerId,
+        candidate: candidate.toJSON(),
+      })
+    },
+    onTrack: (event) => {
+      const session = workerSessions.value.get(data.sessionId)
+      if (session) {
+        session.stream = event.streams[0]
+        workerSessions.value.set(data.sessionId, { ...session })
+      }
+    },
+  })
+
+  workerPeerConnections.set(data.sessionId, pc)
+
+  await setRemoteDescription(pc, data.offer)
+  const answer = await createAnswer(pc)
+  socket.emit('worker-answer', {
+    sharerId: data.sharerId,
+    answer,
+  })
+})
+
+socket.on('worker-answer', async (data: { viewerId: string; answer: RTCSessionDescriptionInit }) => {
+  const pc = peerConnections.get(`worker-${data.viewerId}`)
+  if (pc) {
+    await setRemoteDescription(pc, data.answer)
+  }
+})
+
+socket.on('worker-ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
+  // Check if this is from a worker we're viewing
+  const sessionId = workerSharerIdToSessionId.get(data.fromId)
+  if (sessionId) {
+    const pc = workerPeerConnections.get(sessionId)
+    if (pc) {
+      try {
+        await addIceCandidate(pc, data.candidate)
+      } catch {
+        // ICE candidate might arrive before remote description
+      }
+    }
+    return
+  }
+
+  // Check if this is from a worker viewing us
+  const pc = peerConnections.get(`worker-${data.fromId}`)
+  if (pc) {
+    try {
+      await addIceCandidate(pc, data.candidate)
+    } catch {
+      // ICE candidate might arrive before remote description
+    }
+  }
+})
+
 // Token validation state
 const isValidating = ref(true)
 
@@ -507,12 +767,13 @@ onUnmounted(() => {
     stopSharing()
   }
   cleanupVoiceCall()
+  cleanupWorkerDashboard()
   disconnectSocket()
 })
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+  <div class="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
     <!-- Incoming call modal -->
     <div
       v-if="callStatus === 'ringing'"
@@ -672,6 +933,32 @@ onUnmounted(() => {
           </button>
         </div>
 
+        <!-- Media type indicator (admin-controlled) -->
+        <div
+          v-if="status === 'sharing'"
+          class="mb-4"
+        >
+          <div
+            :class="[
+              'flex items-center justify-center gap-2 py-2 px-4 rounded-lg text-sm font-medium',
+              mediaType === 'screen'
+                ? 'bg-blue-100 text-blue-800 border border-blue-300'
+                : 'bg-purple-100 text-purple-800 border border-purple-300'
+            ]"
+          >
+            <svg v-if="mediaType === 'screen'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+            <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            Sharing {{ mediaType === 'screen' ? 'Screen' : 'Webcam' }}
+          </div>
+          <p v-if="mediaType === 'webcam'" class="text-amber-600 text-xs mt-1 text-center">
+            Webcam mode: remember to stop when done
+          </p>
+        </div>
+
         <!-- Call admin button (when sharing and not in call) -->
         <div
           v-if="status === 'sharing' && callStatus === 'idle'"
@@ -711,6 +998,53 @@ onUnmounted(() => {
           >
             Stop sharing
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Worker Dashboard - View other workers' screens -->
+    <div
+      v-if="status === 'sharing' && workerDashboardEnabled && workerSessionList.length > 0"
+      class="mt-6 w-full max-w-4xl"
+    >
+      <div class="bg-white rounded-xl shadow-lg p-4">
+        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+          </svg>
+          Other Workers ({{ workerSessionList.length }})
+        </h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div
+            v-for="session in workerSessionList"
+            :key="session.sessionId"
+            class="bg-gray-900 rounded-lg overflow-hidden"
+          >
+            <div class="aspect-video relative">
+              <video
+                v-if="session.stream"
+                v-src-object="session.stream"
+                autoplay
+                playsinline
+                muted
+                class="w-full h-full object-contain"
+              ></video>
+              <div
+                v-else
+                class="absolute inset-0 flex items-center justify-center text-gray-500"
+              >
+                <div class="text-center">
+                  <svg class="w-8 h-8 mx-auto mb-1 opacity-50 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  <p class="text-xs">Connecting...</p>
+                </div>
+              </div>
+            </div>
+            <div class="px-3 py-2 bg-gray-800">
+              <p class="text-white text-sm font-medium truncate">{{ session.name }}</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

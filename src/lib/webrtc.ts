@@ -80,6 +80,28 @@ export async function getDisplayMedia(): Promise<MediaStream> {
   })
 }
 
+export async function getUserMediaVideo(): Promise<MediaStream> {
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'user',
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 15, max: 24 },
+    },
+    audio: false,
+  })
+}
+
+export async function replaceVideoTrack(
+  pc: RTCPeerConnection,
+  newTrack: MediaStreamTrack
+): Promise<void> {
+  const sender = pc.getSenders().find((s) => s.track?.kind === 'video')
+  if (sender) {
+    await sender.replaceTrack(newTrack)
+  }
+}
+
 export function stopMediaStream(stream: MediaStream): void {
   stream.getTracks().forEach((track) => {
     track.stop()

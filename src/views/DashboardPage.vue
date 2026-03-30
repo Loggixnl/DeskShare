@@ -12,7 +12,8 @@ import {
 } from '@/lib/webrtc'
 import type { ActiveSession } from '@/lib/types'
 import ScreenTile from '@/components/ScreenTile.vue'
-import { currentAdmin, authToken, logout, getShareUrl } from '@/lib/auth'
+import { currentAdmin, authToken, logout, getShareUrl, setWorkerDashboardEnabled, setMediaType } from '@/lib/auth'
+import type { MediaType } from '@/lib/auth'
 
 const router = useRouter()
 
@@ -32,6 +33,34 @@ const workerIdBySessionId = new Map<string, string>()
 // Share link state
 const shareLink = computed(() => currentAdmin.value ? getShareUrl(currentAdmin.value.shareToken) : '')
 const linkCopied = ref(false)
+
+// Worker dashboard toggle
+const workerDashboardEnabled = ref(currentAdmin.value?.workerDashboardEnabled ?? false)
+const workerDashboardLoading = ref(false)
+
+async function toggleWorkerDashboard() {
+  workerDashboardLoading.value = true
+  const newValue = !workerDashboardEnabled.value
+  const success = await setWorkerDashboardEnabled(newValue)
+  if (success) {
+    workerDashboardEnabled.value = newValue
+  }
+  workerDashboardLoading.value = false
+}
+
+// Media type toggle (screen vs webcam)
+const currentMediaType = ref<MediaType>(currentAdmin.value?.mediaType ?? 'screen')
+const mediaTypeLoading = ref(false)
+
+async function toggleMediaType() {
+  mediaTypeLoading.value = true
+  const newType: MediaType = currentMediaType.value === 'screen' ? 'webcam' : 'screen'
+  const success = await setMediaType(newType)
+  if (success) {
+    currentMediaType.value = newType
+  }
+  mediaTypeLoading.value = false
+}
 
 async function copyShareLink() {
   if (!shareLink.value) return
@@ -583,6 +612,45 @@ onUnmounted(() => {
           </svg>
           {{ linkCopied ? 'Copied!' : 'Copy' }}
         </button>
+        <span class="text-gray-600">|</span>
+        <!-- Media Type Toggle -->
+        <div class="flex items-center gap-2">
+          <span class="text-gray-400 text-sm">Workers share:</span>
+          <button
+            @click="toggleMediaType"
+            :disabled="mediaTypeLoading"
+            :class="[
+              'px-3 py-1 rounded text-xs font-medium transition-colors',
+              currentMediaType === 'screen'
+                ? 'bg-blue-600 text-white'
+                : 'bg-purple-600 text-white',
+              mediaTypeLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+            ]"
+          >
+            {{ currentMediaType === 'screen' ? 'Screen' : 'Webcam' }}
+          </button>
+        </div>
+        <span class="text-gray-600">|</span>
+        <!-- Worker Dashboard Toggle -->
+        <div class="flex items-center gap-2">
+          <span class="text-gray-400 text-sm">Workers see each other:</span>
+          <button
+            @click="toggleWorkerDashboard"
+            :disabled="workerDashboardLoading"
+            :class="[
+              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+              workerDashboardEnabled ? 'bg-blue-600' : 'bg-gray-600',
+              workerDashboardLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+            ]"
+          >
+            <span
+              :class="[
+                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                workerDashboardEnabled ? 'translate-x-6' : 'translate-x-1'
+              ]"
+            />
+          </button>
+        </div>
       </div>
     </div>
 

@@ -2,10 +2,14 @@ import { ref, computed } from 'vue'
 
 const API_BASE = import.meta.env.VITE_API_URL || ''
 
+export type MediaType = 'screen' | 'webcam'
+
 export interface Admin {
   id: number
   email: string
   shareToken: string
+  workerDashboardEnabled?: boolean
+  mediaType?: MediaType
 }
 
 export interface AuthResponse {
@@ -129,6 +133,92 @@ export async function validateShareToken(shareToken: string): Promise<boolean> {
     const text = await response.text()
     const data = text ? JSON.parse(text) : {}
     return data.valid === true
+  } catch {
+    return false
+  }
+}
+
+// Check if worker dashboard is enabled for a share token (for workers)
+export async function getWorkerDashboardEnabled(shareToken: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/api/share/${shareToken}/dashboard-enabled`)
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
+    return data.enabled === true
+  } catch {
+    return false
+  }
+}
+
+// Set worker dashboard enabled (for admins)
+export async function setWorkerDashboardEnabled(enabled: boolean): Promise<boolean> {
+  if (!token.value) return false
+
+  try {
+    const response = await fetch(`${API_BASE}/api/admin/worker-dashboard`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token.value}`,
+      },
+      body: JSON.stringify({ enabled }),
+    })
+
+    if (!response.ok) return false
+
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
+
+    // Update local admin state
+    if (admin.value) {
+      admin.value = { ...admin.value, workerDashboardEnabled: data.enabled }
+      localStorage.setItem('auth_admin', JSON.stringify(admin.value))
+    }
+
+    return data.success === true
+  } catch {
+    return false
+  }
+}
+
+// Get media type for a share token (for workers)
+export async function getMediaType(shareToken: string): Promise<MediaType> {
+  try {
+    const response = await fetch(`${API_BASE}/api/share/${shareToken}/media-type`)
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
+    return data.mediaType === 'webcam' ? 'webcam' : 'screen'
+  } catch {
+    return 'screen'
+  }
+}
+
+// Set media type (for admins)
+export async function setMediaType(mediaType: MediaType): Promise<boolean> {
+  if (!token.value) return false
+
+  try {
+    const response = await fetch(`${API_BASE}/api/admin/media-type`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token.value}`,
+      },
+      body: JSON.stringify({ mediaType }),
+    })
+
+    if (!response.ok) return false
+
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
+
+    // Update local admin state
+    if (admin.value) {
+      admin.value = { ...admin.value, mediaType: data.mediaType }
+      localStorage.setItem('auth_admin', JSON.stringify(admin.value))
+    }
+
+    return data.success === true
   } catch {
     return false
   }
