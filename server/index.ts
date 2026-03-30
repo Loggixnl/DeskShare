@@ -6,7 +6,17 @@ import db, { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from '.
 import { generateToken, requireAuth, verifySocketToken } from './middleware/auth.js'
 
 const app = express()
-app.use(cors())
+
+// CORS configuration for Express
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:3000', 'http://127.0.0.1:3000']
+
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  credentials: true,
+}))
 app.use(express.json())
 
 // Health check endpoint
@@ -116,9 +126,6 @@ app.get('/api/share/:token/validate', (req, res) => {
 })
 
 const httpServer = createServer(app)
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['http://localhost:3000', 'http://127.0.0.1:3000']
 
 const io = new Server(httpServer, {
   cors: {
