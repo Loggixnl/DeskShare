@@ -67,20 +67,31 @@ export async function createAdmin(
   email: string,
   password: string
 ): Promise<AdminPublic> {
+  console.log('[DB] createAdmin called for:', email)
+
   // Check if email already exists
+  console.log('[DB] Checking if email exists...')
   const existing = findAdminByEmail.get(email)
   if (existing) {
+    console.log('[DB] Email already exists')
     throw new Error('Email already registered')
   }
+  console.log('[DB] Email is available')
 
   // Hash password
+  console.log('[DB] Hashing password...')
   const passwordHash = await bcrypt.hash(password, 10)
+  console.log('[DB] Password hashed')
 
   // Generate unique share token
+  console.log('[DB] Generating share token...')
   const shareToken = uuidv4()
+  console.log('[DB] Share token generated:', shareToken)
 
   // Insert admin
+  console.log('[DB] Inserting admin...')
   const result = insertAdmin.run(email, passwordHash, shareToken)
+  console.log('[DB] Admin inserted with id:', result.lastInsertRowid)
 
   return {
     id: result.lastInsertRowid as number,

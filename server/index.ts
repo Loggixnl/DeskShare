@@ -26,19 +26,26 @@ app.get('/health', (_, res) => {
 
 // Auth API endpoints
 app.post('/api/auth/register', async (req, res) => {
+  console.log('[Auth] Register request received:', { body: req.body })
   try {
     const { email, password } = req.body
 
     if (!email || !password) {
+      console.log('[Auth] Missing email or password')
       return res.status(400).json({ error: 'Email and password are required' })
     }
 
     if (password.length < 6) {
+      console.log('[Auth] Password too short')
       return res.status(400).json({ error: 'Password must be at least 6 characters' })
     }
 
+    console.log('[Auth] Creating admin for:', email)
     const admin = await createAdmin(email, password)
+    console.log('[Auth] Admin created:', admin.id)
+
     const token = generateToken(admin)
+    console.log('[Auth] Token generated')
 
     res.json({
       token,
@@ -49,12 +56,16 @@ app.post('/api/auth/register', async (req, res) => {
       },
     })
   } catch (error) {
+    console.error('[Auth] Register error:', error)
+    console.error('[Auth] Error type:', typeof error)
+    console.error('[Auth] Error constructor:', error?.constructor?.name)
+
     if (error instanceof Error && error.message === 'Email already registered') {
       return res.status(409).json({ error: error.message })
     }
-    console.error('[Auth] Register error:', error)
-    const errorMessage = error instanceof Error ? error.message : 'Registration failed'
-    res.status(500).json({ error: errorMessage })
+
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    res.status(500).json({ error: `Registration failed: ${errorMessage}` })
   }
 })
 
