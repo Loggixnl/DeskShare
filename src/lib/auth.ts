@@ -55,7 +55,13 @@ export async function register(email: string, password: string): Promise<AuthRes
     body: JSON.stringify({ email, password }),
   })
 
-  const data = await response.json()
+  let data
+  try {
+    const text = await response.text()
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    throw new Error('Server returned an invalid response')
+  }
 
   if (!response.ok) {
     throw new Error(data.error || 'Registration failed')
@@ -73,7 +79,13 @@ export async function login(email: string, password: string): Promise<AuthRespon
     body: JSON.stringify({ email, password }),
   })
 
-  const data = await response.json()
+  let data
+  try {
+    const text = await response.text()
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    throw new Error('Server returned an invalid response')
+  }
 
   if (!response.ok) {
     throw new Error(data.error || 'Login failed')
@@ -99,7 +111,8 @@ export async function verifyAuth(): Promise<boolean> {
       return false
     }
 
-    const data = await response.json()
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
     admin.value = data.admin
     localStorage.setItem('auth_admin', JSON.stringify(data.admin))
     return true
@@ -113,7 +126,8 @@ export async function verifyAuth(): Promise<boolean> {
 export async function validateShareToken(shareToken: string): Promise<boolean> {
   try {
     const response = await fetch(`${API_BASE}/api/share/${shareToken}/validate`)
-    const data = await response.json()
+    const text = await response.text()
+    const data = text ? JSON.parse(text) : {}
     return data.valid === true
   } catch {
     return false
