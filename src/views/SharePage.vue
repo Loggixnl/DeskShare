@@ -16,6 +16,7 @@ import {
   stopMediaStream,
 } from '@/lib/webrtc'
 import type { ShareStatus } from '@/lib/types'
+import WorkerTile from '@/components/WorkerTile.vue'
 
 const route = useRoute()
 const token = computed(() => route.params.token as string)
@@ -57,27 +58,6 @@ const workerPeerConnections = new Map<string, RTCPeerConnection>()
 const workerSharerIdToSessionId = new Map<string, string>()
 
 const workerSessionList = computed(() => Array.from(workerSessions.value.values()))
-
-// Custom directive to set video srcObject
-const vSrcObject = {
-  mounted: (el: HTMLVideoElement, binding: { value: MediaStream | null }) => {
-    if (binding.value) {
-      el.srcObject = binding.value
-      el.play().catch(() => {})
-    }
-  },
-  updated: (el: HTMLVideoElement, binding: { value: MediaStream | null }) => {
-    if (el.srcObject !== binding.value) {
-      el.srcObject = binding.value
-      if (binding.value) {
-        el.play().catch(() => {})
-      }
-    }
-  },
-  unmounted: (el: HTMLVideoElement) => {
-    el.srcObject = null
-  },
-}
 
 // Worker calling admin
 async function callAdmin() {
@@ -1015,36 +995,12 @@ onUnmounted(() => {
           Other Workers ({{ workerSessionList.length }})
         </h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <div
+          <WorkerTile
             v-for="session in workerSessionList"
             :key="session.sessionId"
-            class="bg-gray-900 rounded-lg overflow-hidden"
-          >
-            <div class="aspect-video relative">
-              <video
-                v-if="session.stream"
-                v-src-object="session.stream"
-                autoplay
-                playsinline
-                muted
-                class="w-full h-full object-contain"
-              ></video>
-              <div
-                v-else
-                class="absolute inset-0 flex items-center justify-center text-gray-500"
-              >
-                <div class="text-center">
-                  <svg class="w-8 h-8 mx-auto mb-1 opacity-50 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                  <p class="text-xs">Connecting...</p>
-                </div>
-              </div>
-            </div>
-            <div class="px-3 py-2 bg-gray-800">
-              <p class="text-white text-sm font-medium truncate">{{ session.name }}</p>
-            </div>
-          </div>
+            :name="session.name"
+            :stream="session.stream"
+          />
         </div>
       </div>
     </div>
