@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { getAdminById, AdminPublic } from '../db'
+import { getAdminById, AdminPublic } from '../db.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production'
 const JWT_EXPIRES_IN = '7d'

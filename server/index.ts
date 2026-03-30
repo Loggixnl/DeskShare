@@ -2,8 +2,8 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db'
-import { generateToken, requireAuth, verifySocketToken } from './middleware/auth'
+import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
+import { generateToken, requireAuth, verifySocketToken } from './middleware/auth.js'
 
 const app = express()
 app.use(cors())
