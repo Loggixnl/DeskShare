@@ -7,17 +7,23 @@ import { generateToken, requireAuth, verifySocketToken } from './middleware/auth
 
 const app = express()
 
-// CORS configuration for Express
+// CORS configuration for Express - allow all origins for debugging
+app.use(cors({
+  origin: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+}))
+
+// Handle preflight requests explicitly
+app.options('*', cors())
+
+app.use(express.json())
+
+// Reusable allowed origins for Socket.IO
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
   : ['http://localhost:3000', 'http://127.0.0.1:3000']
-
-app.use(cors({
-  origin: allowedOrigins,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  credentials: true,
-}))
-app.use(express.json())
 
 // Health check endpoint
 app.get('/health', (_, res) => {
