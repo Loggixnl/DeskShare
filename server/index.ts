@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import db, { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
+import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
 import { generateToken, requireAuth, verifySocketToken } from './middleware/auth.js'
 
 const app = express()
@@ -26,18 +26,8 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   : ['http://localhost:3000', 'http://127.0.0.1:3000']
 
 // Health check endpoint
-app.get('/health', (_, res) => {
-  try {
-    // Test database connection
-    const result = db.prepare('SELECT 1 as test').get()
-    res.json({ status: 'ok', database: 'connected', test: result })
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      database: 'failed',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    })
-  }
+app.get('/health', async (_, res) => {
+  res.json({ status: 'ok', database: 'turso' })
 })
 
 // Auth API endpoints
@@ -125,9 +115,9 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
 })
 
 // Validate share token endpoint (for workers to check if link is valid)
-app.get('/api/share/:token/validate', (req, res) => {
+app.get('/api/share/:token/validate', async (req, res) => {
   const { token } = req.params
-  const valid = isValidShareToken(token)
+  const valid = await isValidShareToken(token)
   res.json({ valid })
 })
 
@@ -179,12 +169,13 @@ io.on('connection', (socket) => {
   console.log(`[Socket] Connected: ${socket.id}`)
 
   // Worker joins to share screen
-  socket.on('join-share', (data: { token: string; name?: string }) => {
+  socket.on('join-share', async (data: { token: string; name?: string }) => {
     const { token, name } = data
     console.log(`[Share] Worker joining: ${token} (${name || 'unnamed'})`)
 
     // Validate token against database
-    if (!isValidShareToken(token)) {
+    const validToken = await isValidShareToken(token)
+    if (!validToken) {
       console.log(`[Share] Invalid token: ${token}`)
       socket.emit('share-error', { error: 'Invalid share link' })
       return
@@ -222,11 +213,11 @@ io.on('connection', (socket) => {
   })
 
   // Dashboard viewer joins - now requires JWT auth
-  socket.on('join-dashboard', (data: { token: string }) => {
+  socket.on('join-dashboard', async (data: { token: string }) => {
     const { token: jwtToken } = data
 
     // Verify JWT
-    const admin = verifySocketToken(jwtToken)
+    const admin = await verifySocketToken(jwtToken)
     if (!admin) {
       console.log(`[Dashboard] Invalid auth token for ${socket.id}`)
       socket.emit('dashboard-error', { error: 'Authentication required' })

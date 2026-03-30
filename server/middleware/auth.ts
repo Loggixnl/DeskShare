@@ -41,7 +41,7 @@ export function verifyToken(token: string): JWTPayload | null {
 }
 
 // Express middleware to require authentication
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -55,7 +55,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: 'Invalid or expired token' })
   }
 
-  const admin = getAdminById(payload.adminId)
+  const admin = await getAdminById(payload.adminId)
   if (!admin) {
     return res.status(401).json({ error: 'Admin not found' })
   }
@@ -65,7 +65,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 // Verify token from Socket.IO handshake
-export function verifySocketToken(token: string): AdminPublic | null {
+export async function verifySocketToken(token: string): Promise<AdminPublic | null> {
   const payload = verifyToken(token)
   if (!payload) {
     return null

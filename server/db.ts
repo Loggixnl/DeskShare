@@ -1,34 +1,29 @@
-import Database from 'better-sqlite3'
+import { createClient } from '@libsql/client'
 import bcrypt from 'bcryptjs'
 import { v4 as uuidv4 } from 'uuid'
-import path from 'path'
-import fs from 'fs'
 
-// Database path from env or default
-const DB_PATH = process.env.DATABASE_PATH || './data/deskshare.db'
+// Turso database configuration
+const db = createClient({
+  url: process.env.TURSO_DATABASE_URL || 'file:./data/local.db',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+})
 
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH)
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true })
+// Initialize database tables
+async function initializeDatabase() {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS admins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      share_token TEXT UNIQUE NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `)
+  console.log('[DB] Database initialized')
 }
 
-// Initialize database connection
-const db = new Database(DB_PATH)
-
-// Enable WAL mode for better concurrency
-db.pragma('journal_mode = WAL')
-
-// Create tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS admins (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    share_token TEXT UNIQUE NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`)
+// Initialize on module load
+initializeDatabase().catch(console.error)
 
 export interface Admin {
   id: number
@@ -45,23 +40,6 @@ export interface AdminPublic {
   created_at: string
 }
 
-// Prepared statements for performance
-const findAdminByEmail = db.prepare<[string], Admin>(
-  'SELECT * FROM admins WHERE email = ?'
-)
-
-const findAdminByToken = db.prepare<[string], Admin>(
-  'SELECT * FROM admins WHERE share_token = ?'
-)
-
-const findAdminById = db.prepare<[number], Admin>(
-  'SELECT * FROM admins WHERE id = ?'
-)
-
-const insertAdmin = db.prepare<[string, string, string]>(
-  'INSERT INTO admins (email, password_hash, share_token) VALUES (?, ?, ?)'
-)
-
 // Create a new admin account
 export async function createAdmin(
   email: string,
@@ -71,8 +49,12 @@ export async function createAdmin(
 
   // Check if email already exists
   console.log('[DB] Checking if email exists...')
-  const existing = findAdminByEmail.get(email)
-  if (existing) {
+  const existing = await db.execute({
+    sql: 'SELECT * FROM admins WHERE email = ?',
+    args: [email],
+  })
+
+  if (existing.rows.length > 0) {
     console.log('[DB] Email already exists')
     throw new Error('Email already registered')
   }
@@ -90,11 +72,14 @@ export async function createAdmin(
 
   // Insert admin
   console.log('[DB] Inserting admin...')
-  const result = insertAdmin.run(email, passwordHash, shareToken)
+  const result = await db.execute({
+    sql: 'INSERT INTO admins (email, password_hash, share_token) VALUES (?, ?, ?)',
+    args: [email, passwordHash, shareToken],
+  })
   console.log('[DB] Admin inserted with id:', result.lastInsertRowid)
 
   return {
-    id: result.lastInsertRowid as number,
+    id: Number(result.lastInsertRowid),
     email,
     share_token: shareToken,
     created_at: new Date().toISOString(),
@@ -106,11 +91,16 @@ export async function verifyAdmin(
   email: string,
   password: string
 ): Promise<AdminPublic | null> {
-  const admin = findAdminByEmail.get(email)
-  if (!admin) {
+  const result = await db.execute({
+    sql: 'SELECT * FROM admins WHERE email = ?',
+    args: [email],
+  })
+
+  if (result.rows.length === 0) {
     return null
   }
 
+  const admin = result.rows[0] as unknown as Admin
   const valid = await bcrypt.compare(password, admin.password_hash)
   if (!valid) {
     return null
@@ -125,12 +115,17 @@ export async function verifyAdmin(
 }
 
 // Get admin by ID (for JWT verification)
-export function getAdminById(id: number): AdminPublic | null {
-  const admin = findAdminById.get(id)
-  if (!admin) {
+export async function getAdminById(id: number): Promise<AdminPublic | null> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM admins WHERE id = ?',
+    args: [id],
+  })
+
+  if (result.rows.length === 0) {
     return null
   }
 
+  const admin = result.rows[0] as unknown as Admin
   return {
     id: admin.id,
     email: admin.email,
@@ -140,18 +135,26 @@ export function getAdminById(id: number): AdminPublic | null {
 }
 
 // Check if a share token is valid (exists in database)
-export function isValidShareToken(token: string): boolean {
-  const admin = findAdminByToken.get(token)
-  return !!admin
+export async function isValidShareToken(token: string): Promise<boolean> {
+  const result = await db.execute({
+    sql: 'SELECT id FROM admins WHERE share_token = ?',
+    args: [token],
+  })
+  return result.rows.length > 0
 }
 
 // Get admin by share token
-export function getAdminByShareToken(token: string): AdminPublic | null {
-  const admin = findAdminByToken.get(token)
-  if (!admin) {
+export async function getAdminByShareToken(token: string): Promise<AdminPublic | null> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM admins WHERE share_token = ?',
+    args: [token],
+  })
+
+  if (result.rows.length === 0) {
     return null
   }
 
+  const admin = result.rows[0] as unknown as Admin
   return {
     id: admin.id,
     email: admin.email,
