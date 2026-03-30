@@ -25,6 +25,7 @@ const sharerIdToSessionId = new Map<string, string>()
 // Voice call state - keyed by sessionId
 const callStatus = ref<Map<string, 'idle' | 'calling' | 'connected'>>(new Map())
 const voicePeerConnections = new Map<string, RTCPeerConnection>()
+const remoteAudioElements = new Map<string, HTMLAudioElement>()
 const localAudioStream = ref<MediaStream | null>(null)
 const workerIdBySessionId = new Map<string, string>()
 
@@ -168,9 +169,12 @@ async function setupVoiceConnection(sessionId: string, token: string, workerId: 
       })
     },
     onTrack: (event) => {
+      console.log('[Voice] Received remote audio track')
       const audio = new Audio()
       audio.srcObject = event.streams[0]
-      audio.play()
+      audio.play().catch(err => console.error('[Voice] Audio play failed:', err))
+      // Store audio element for cleanup
+      remoteAudioElements.set(sessionId, audio)
     },
   })
 
@@ -195,10 +199,25 @@ function endCall(sessionId: string) {
     socket.emit('call-ended', { targetId: workerId, token: session.token })
   }
 
+  // Stop remote audio
+  const audio = remoteAudioElements.get(sessionId)
+  if (audio) {
+    audio.pause()
+    audio.srcObject = null
+    remoteAudioElements.delete(sessionId)
+  }
+
+  // Close peer connection
   const vpc = voicePeerConnections.get(sessionId)
   if (vpc) {
     closePeerConnection(vpc)
     voicePeerConnections.delete(sessionId)
+  }
+
+  // Stop local audio tracks for this call
+  if (localAudioStream.value) {
+    localAudioStream.value.getTracks().forEach(track => track.stop())
+    localAudioStream.value = null
   }
 
   workerIdBySessionId.delete(sessionId)
@@ -420,29 +439,46 @@ socket.on('call-ended', (data: { token: string }) => {
 })
 
 socket.on('voice-answer', async (data: { workerId: string; answer: RTCSessionDescriptionInit; token: string }) => {
-  for (const [sessionId, session] of sessions.value) {
-    if (session.token === data.token) {
-      const pc = voicePeerConnections.get(sessionId)
-      if (pc) {
-        await setRemoteDescription(pc, data.answer)
-      }
+  console.log('[Voice] Received voice answer from worker:', data.workerId)
+
+  // Find sessionId by workerId
+  let targetSessionId: string | null = null
+  for (const [sessionId, workerId] of workerIdBySessionId) {
+    if (workerId === data.workerId) {
+      targetSessionId = sessionId
       break
     }
+  }
+
+  if (targetSessionId) {
+    const pc = voicePeerConnections.get(targetSessionId)
+    if (pc) {
+      console.log('[Voice] Setting remote description for session:', targetSessionId)
+      await setRemoteDescription(pc, data.answer)
+    }
+  } else {
+    console.warn('[Voice] Could not find session for worker:', data.workerId)
   }
 })
 
 socket.on('voice-ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit; token: string }) => {
-  for (const [sessionId, session] of sessions.value) {
-    if (session.token === data.token) {
-      const pc = voicePeerConnections.get(sessionId)
-      if (pc) {
-        try {
-          await addIceCandidate(pc, data.candidate)
-        } catch {
-          // ICE candidate might arrive before remote description
-        }
-      }
+  // Find sessionId by workerId (fromId)
+  let targetSessionId: string | null = null
+  for (const [sessionId, workerId] of workerIdBySessionId) {
+    if (workerId === data.fromId) {
+      targetSessionId = sessionId
       break
+    }
+  }
+
+  if (targetSessionId) {
+    const pc = voicePeerConnections.get(targetSessionId)
+    if (pc) {
+      try {
+        await addIceCandidate(pc, data.candidate)
+      } catch {
+        // ICE candidate might arrive before remote description
+      }
     }
   }
 })

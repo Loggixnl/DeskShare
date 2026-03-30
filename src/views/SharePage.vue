@@ -35,6 +35,7 @@ const incomingCall = ref<{ callerId: string } | null>(null)
 const callStatus = ref<'idle' | 'ringing' | 'calling' | 'connected'>('idle')
 const voicePeerConnection = ref<RTCPeerConnection | null>(null)
 const localAudioStream = ref<MediaStream | null>(null)
+const remoteAudio = ref<HTMLAudioElement | null>(null)
 const currentCallerId = ref<string | null>(null)
 
 // Worker calling admin
@@ -377,21 +378,39 @@ function endCallFromWorker() {
 }
 
 function cleanupVoiceCall() {
+  console.log('[Voice] Cleaning up voice call')
+
+  // Stop remote audio
+  if (remoteAudio.value) {
+    remoteAudio.value.pause()
+    remoteAudio.value.srcObject = null
+    remoteAudio.value = null
+  }
+
+  // Close peer connection
   if (voicePeerConnection.value) {
     closePeerConnection(voicePeerConnection.value)
     voicePeerConnection.value = null
   }
+
+  // Stop local audio
   if (localAudioStream.value) {
     localAudioStream.value.getTracks().forEach((track) => track.stop())
     localAudioStream.value = null
   }
+
   currentCallerId.value = null
   callStatus.value = 'idle'
 }
 
 // Handle voice offer from dashboard
 socket.on('voice-offer', async (data: { callerId: string; offer: RTCSessionDescriptionInit; token: string }) => {
-  if (!localAudioStream.value) return
+  console.log('[Voice] Received voice offer from:', data.callerId, 'localAudioStream:', !!localAudioStream.value)
+
+  if (!localAudioStream.value) {
+    console.error('[Voice] No local audio stream available!')
+    return
+  }
 
   const pc = createPeerConnection({
     onIceCandidate: (candidate) => {
@@ -402,10 +421,12 @@ socket.on('voice-offer', async (data: { callerId: string; offer: RTCSessionDescr
       })
     },
     onTrack: (event) => {
+      console.log('[Voice] Received remote audio track from admin')
       // Play incoming audio from dashboard
       const audio = new Audio()
       audio.srcObject = event.streams[0]
-      audio.play()
+      audio.play().catch(err => console.error('[Voice] Audio play failed:', err))
+      remoteAudio.value = audio
     },
   })
 
@@ -419,6 +440,7 @@ socket.on('voice-offer', async (data: { callerId: string; offer: RTCSessionDescr
   await setRemoteDescription(pc, data.offer)
   const answer = await createAnswer(pc)
 
+  console.log('[Voice] Sending voice answer')
   socket.emit('voice-answer', {
     callerId: data.callerId,
     answer,
