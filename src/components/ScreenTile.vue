@@ -11,6 +11,7 @@ const emit = defineEmits<{
   (e: 'focus', sessionId: string): void
   (e: 'call', sessionId: string): void
   (e: 'hangup', sessionId: string): void
+  (e: 'cancelCall', sessionId: string): void
 }>()
 
 const videoElement = ref<HTMLVideoElement | null>(null)
@@ -28,19 +29,32 @@ function formatTime(date: Date): string {
   return new Date(date).toLocaleTimeString()
 }
 
+// Explicitly play video to fix Windows black screen issue
+async function playVideo() {
+  if (videoElement.value) {
+    try {
+      await videoElement.value.play()
+    } catch (err) {
+      console.warn('[Video] Autoplay failed, user interaction may be required:', err)
+    }
+  }
+}
+
 watch(
   () => props.session.stream,
-  (stream) => {
+  async (stream) => {
     if (videoElement.value && stream) {
       videoElement.value.srcObject = stream
+      await playVideo()
     }
   },
   { immediate: true }
 )
 
-onMounted(() => {
+onMounted(async () => {
   if (videoElement.value && props.session.stream) {
     videoElement.value.srcObject = props.session.stream
+    await playVideo()
   }
 })
 
@@ -99,21 +113,26 @@ onUnmounted(() => {
         <span class="text-white font-medium text-sm truncate max-w-[120px]">
           {{ session.name }}
         </span>
-        <!-- Call button -->
+        <!-- Call button (idle state) -->
         <button
-          v-if="callStatus !== 'connected'"
+          v-if="callStatus === 'idle' || !callStatus"
           @click.stop="emit('call', session.sessionId || session.token)"
-          :disabled="callStatus === 'calling'"
-          :class="[
-            'p-1.5 rounded-full transition',
-            callStatus === 'calling'
-              ? 'bg-yellow-500 animate-pulse'
-              : 'bg-gray-700 hover:bg-green-600'
-          ]"
-          :title="callStatus === 'calling' ? 'Calling...' : 'Start voice call'"
+          class="p-1.5 rounded-full bg-gray-700 hover:bg-green-600 transition"
+          title="Start voice call"
         >
           <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+          </svg>
+        </button>
+        <!-- Cancel call button (calling state) -->
+        <button
+          v-else-if="callStatus === 'calling'"
+          @click.stop="emit('cancelCall', session.sessionId || session.token)"
+          class="p-1.5 rounded-full bg-yellow-500 hover:bg-red-600 animate-pulse transition"
+          title="Cancel call"
+        >
+          <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
         <!-- Hangup button (when connected) -->

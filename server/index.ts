@@ -308,6 +308,17 @@ io.on('connection', (socket) => {
     }
   })
 
+  // Voice call signaling - Dashboard cancels pending call
+  socket.on('call-cancelled', (data: { sessionId: string; token: string }) => {
+    const session = activeSessions.get(data.sessionId)
+    if (session) {
+      console.log(`[Call] Dashboard cancelled call to session ${data.sessionId}`)
+      io.to(session.socketId).emit('call-cancelled', {
+        token: data.token,
+      })
+    }
+  })
+
   // Voice call signaling - Worker calling dashboard
   socket.on('worker-call-admin', (data: { token: string; workerName: string }) => {
     const session = getSessionBySocketId(socket.id)

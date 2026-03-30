@@ -206,6 +206,18 @@ function endCall(sessionId: string) {
   callStatus.value = new Map(callStatus.value)
 }
 
+function cancelCall(sessionId: string) {
+  const session = sessions.value.get(sessionId)
+  if (session) {
+    // Notify worker that call was cancelled
+    socket.emit('call-cancelled', { sessionId, token: session.token })
+  }
+
+  // Reset call status
+  callStatus.value.set(sessionId, 'idle')
+  callStatus.value = new Map(callStatus.value)
+}
+
 // Focus mode - now uses sessionId
 const focusedSessionId = ref<string | null>(null)
 const focusedSession = computed(() =>
@@ -565,6 +577,7 @@ onUnmounted(() => {
           @focus="focusSession(session.sessionId || '')"
           @call="initiateCall(session.sessionId || '')"
           @hangup="endCall(session.sessionId || '')"
+          @cancel-call="cancelCall(session.sessionId || '')"
         />
       </div>
     </main>

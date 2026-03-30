@@ -83,6 +83,10 @@ async function handleSubmit() {
           Create one
         </router-link>
       </p>
+
+      <p class="mt-4 text-center text-gray-400 text-xs">
+        v1.1.0
+      </p>
     </div>
   </div>
 </template>

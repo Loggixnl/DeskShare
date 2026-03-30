@@ -324,6 +324,13 @@ socket.on('call-incoming', (data: { callerId: string }) => {
   showCallNotification()
 })
 
+// Handle admin cancelling the call before worker answers
+socket.on('call-cancelled', () => {
+  console.log('[Call] Call cancelled by admin')
+  incomingCall.value = null
+  callStatus.value = 'idle'
+})
+
 async function acceptCall() {
   if (!incomingCall.value) return
 
