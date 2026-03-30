@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
+import db, { createAdmin, verifyAdmin, isValidShareToken, getAdminById } from './db.js'
 import { generateToken, requireAuth, verifySocketToken } from './middleware/auth.js'
 
 const app = express()
@@ -11,7 +11,17 @@ app.use(express.json())
 
 // Health check endpoint
 app.get('/health', (_, res) => {
-  res.json({ status: 'ok' })
+  try {
+    // Test database connection
+    const result = db.prepare('SELECT 1 as test').get()
+    res.json({ status: 'ok', database: 'connected', test: result })
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      database: 'failed',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    })
+  }
 })
 
 // Auth API endpoints
@@ -43,7 +53,8 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(409).json({ error: error.message })
     }
     console.error('[Auth] Register error:', error)
-    res.status(500).json({ error: 'Registration failed' })
+    const errorMessage = error instanceof Error ? error.message : 'Registration failed'
+    res.status(500).json({ error: errorMessage })
   }
 })
 
