@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getSocket, connectSocket, disconnectSocket } from '@/lib/socket'
-import { validateShareToken, getWorkerDashboardEnabled, getMediaType } from '@/lib/auth'
+import { validateShareToken, getMediaType } from '@/lib/auth'
 import {
   createPeerConnection,
   createOffer,
@@ -16,9 +16,10 @@ import {
   stopMediaStream,
 } from '@/lib/webrtc'
 import type { ShareStatus } from '@/lib/types'
-import WorkerTile from '@/components/WorkerTile.vue'
+import { setWorkerSession } from '@/lib/workerState'
 
 const route = useRoute()
+const router = useRouter()
 const token = computed(() => route.params.token as string)
 
 // Worker name - required before sharing
@@ -43,21 +44,6 @@ const voicePeerConnection = ref<RTCPeerConnection | null>(null)
 const localAudioStream = ref<MediaStream | null>(null)
 const remoteAudio = ref<HTMLAudioElement | null>(null)
 const currentCallerId = ref<string | null>(null)
-
-// Worker Dashboard state - view other workers' screens
-interface WorkerSession {
-  sessionId: string
-  token: string
-  name: string
-  startedAt: Date
-  stream?: MediaStream
-}
-const workerDashboardEnabled = ref(false)
-const workerSessions = ref<Map<string, WorkerSession>>(new Map())
-const workerPeerConnections = new Map<string, RTCPeerConnection>()
-const workerSharerIdToSessionId = new Map<string, string>()
-
-const workerSessionList = computed(() => Array.from(workerSessions.value.values()))
 
 // Worker calling admin
 async function callAdmin() {
@@ -198,6 +184,28 @@ socket.on('share-error', (data: { error: string }) => {
   }
 })
 
+// Handle share ready - redirect to worker dashboard
+socket.on('share-ready', (data: { token: string; sessionId: string }) => {
+  console.log('[Share] Share ready, redirecting to worker dashboard')
+
+  // Store session in shared state (persists across route changes)
+  if (localStream.value) {
+    setWorkerSession(
+      localStream.value,
+      data.sessionId,
+      data.token,
+      workerName.value.trim(),
+      mediaType.value
+    )
+  }
+
+  // Mark that we're transitioning so onUnmounted doesn't cleanup
+  sessionStorage.setItem('workerTransitioning', 'true')
+
+  // Redirect to worker dashboard
+  router.push({ name: 'worker-dashboard', params: { token: data.token } })
+})
+
 const statusText = computed(() => {
   switch (status.value) {
     case 'idle':
@@ -266,9 +274,6 @@ async function startSharing() {
     // Connect to signaling server
     connectSocket()
     socket.emit('join-share', { token: token.value, name: workerName.value.trim() })
-
-    // Initialize worker dashboard (check if enabled and load other workers)
-    initWorkerDashboard()
   } catch (err: unknown) {
     status.value = 'error'
     if (err instanceof Error) {
@@ -284,15 +289,24 @@ async function startSharing() {
 async function switchMedia(type: 'screen' | 'webcam') {
   if (type === mediaType.value || status.value !== 'sharing') return
 
+  const oldStream = localStream.value
+  const oldMediaType = mediaType.value
+
   try {
+    console.log(`[Media] Switching from ${oldMediaType} to ${type}`)
+
     // Get new stream based on type
     const newStream = type === 'screen'
       ? await getDisplayMedia()
       : await getUserMediaVideo()
 
-    // Stop old stream tracks
-    if (localStream.value) {
-      stopMediaStream(localStream.value)
+    // Successfully got new stream - now stop old stream tracks
+    if (oldStream) {
+      console.log('[Media] Stopping old stream tracks')
+      oldStream.getTracks().forEach(track => {
+        track.stop()
+        console.log(`[Media] Stopped track: ${track.kind}`)
+      })
     }
 
     // Update local stream and preview
@@ -310,15 +324,30 @@ async function switchMedia(type: 'screen' | 'webcam') {
 
     // Replace track in all existing peer connections
     const newTrack = newStream.getVideoTracks()[0]
-    for (const pc of peerConnections.values()) {
-      await replaceVideoTrack(pc, newTrack)
+    console.log(`[Media] Replacing track in ${peerConnections.size} peer connections`)
+    for (const [id, pc] of peerConnections.entries()) {
+      try {
+        const senders = pc.getSenders()
+        const videoSender = senders.find(s => s.track?.kind === 'video')
+        if (videoSender) {
+          await videoSender.replaceTrack(newTrack)
+          console.log(`[Media] Replaced track for peer ${id}`)
+        } else {
+          console.warn(`[Media] No video sender found for peer ${id}`)
+        }
+      } catch (e) {
+        console.error(`[Media] Failed to replace track for peer ${id}:`, e)
+      }
     }
 
     mediaType.value = type
+    console.log(`[Media] Successfully switched to ${type}`)
   } catch (err: unknown) {
-    console.error('Failed to switch media:', err)
+    console.error('[Media] Failed to switch media:', err)
+    // Keep the old stream active if switch failed
     if (err instanceof Error && err.name === 'NotAllowedError') {
-      errorMessage.value = 'Permission denied'
+      // User cancelled - this is not an error, just keep current state
+      console.log('[Media] User cancelled media picker, keeping current media')
     }
   }
 }
@@ -333,9 +362,6 @@ function stopSharing() {
   // Close all peer connections
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
-
-  // Cleanup worker dashboard
-  cleanupWorkerDashboard()
 
   // Notify server
   socket.emit('share-stopped', { token: token.value })
@@ -559,165 +585,11 @@ socket.on('admin-rejected', () => {
   callStatus.value = 'idle'
 })
 
-// Worker Dashboard - initialize when sharing starts
-async function initWorkerDashboard() {
-  const enabled = await getWorkerDashboardEnabled(token.value)
-  workerDashboardEnabled.value = enabled
-  if (enabled) {
-    socket.emit('join-worker-dashboard', { token: token.value })
-  }
-}
-
-function cleanupWorkerDashboard() {
-  workerPeerConnections.forEach((pc) => closePeerConnection(pc))
-  workerPeerConnections.clear()
-  workerSharerIdToSessionId.clear()
-  workerSessions.value.clear()
-}
-
-// Worker Dashboard socket handlers
-socket.on('worker-dashboard-sessions', (sessions: Array<{ sessionId: string; token: string; name: string; startedAt: string }>) => {
-  console.log('[Worker Dashboard] Received sessions:', sessions.length)
-  sessions.forEach((session) => {
-    workerSessions.value.set(session.sessionId, {
-      sessionId: session.sessionId,
-      token: session.token,
-      name: session.name,
-      startedAt: new Date(session.startedAt),
-    })
-    // Request offer from each worker
-    socket.emit('worker-request-offer', { targetSessionId: session.sessionId })
-  })
-})
-
-socket.on('worker-dashboard-changed', (data: { enabled: boolean }) => {
-  console.log('[Worker Dashboard] Setting changed:', data.enabled)
-  workerDashboardEnabled.value = data.enabled
-  if (data.enabled && status.value === 'sharing') {
-    socket.emit('join-worker-dashboard', { token: token.value })
-  } else if (!data.enabled) {
-    cleanupWorkerDashboard()
-  }
-})
-
 // Admin changed media type - switch automatically
 socket.on('media-type-changed', async (data: { mediaType: 'screen' | 'webcam' }) => {
   console.log('[Media] Admin changed media type to:', data.mediaType)
   if (status.value === 'sharing' && data.mediaType !== mediaType.value) {
     await switchMedia(data.mediaType)
-  }
-})
-
-socket.on('worker-session-joined', (data: { sessionId: string; token: string; name: string; startedAt: string }) => {
-  if (!workerDashboardEnabled.value) return
-  console.log('[Worker Dashboard] New worker joined:', data.name)
-  workerSessions.value.set(data.sessionId, {
-    sessionId: data.sessionId,
-    token: data.token,
-    name: data.name,
-    startedAt: new Date(data.startedAt),
-  })
-  socket.emit('worker-request-offer', { targetSessionId: data.sessionId })
-})
-
-socket.on('worker-session-left', (data: { sessionId: string }) => {
-  console.log('[Worker Dashboard] Worker left:', data.sessionId)
-  workerSessions.value.delete(data.sessionId)
-  const pc = workerPeerConnections.get(data.sessionId)
-  if (pc) {
-    closePeerConnection(pc)
-    workerPeerConnections.delete(data.sessionId)
-  }
-})
-
-// Another worker viewing this worker's stream
-socket.on('worker-viewer-joined', async (data: { viewerId: string }) => {
-  if (!localStream.value) return
-  console.log('[Worker Dashboard] Worker viewer joined:', data.viewerId)
-
-  const pc = createPeerConnection({
-    onIceCandidate: (candidate) => {
-      socket.emit('worker-ice-candidate', {
-        targetId: data.viewerId,
-        candidate: candidate.toJSON(),
-      })
-    },
-  })
-
-  localStream.value.getTracks().forEach((track) => {
-    pc.addTrack(track, localStream.value!)
-  })
-
-  peerConnections.set(`worker-${data.viewerId}`, pc)
-
-  const offer = await createOffer(pc)
-  socket.emit('worker-offer', {
-    viewerId: data.viewerId,
-    offer,
-  })
-})
-
-// Receiving offer from another worker
-socket.on('worker-offer', async (data: { sharerId: string; offer: RTCSessionDescriptionInit; sessionId: string; token: string }) => {
-  console.log('[Worker Dashboard] Received offer from worker:', data.sessionId)
-  workerSharerIdToSessionId.set(data.sharerId, data.sessionId)
-
-  const pc = createPeerConnection({
-    onIceCandidate: (candidate) => {
-      socket.emit('worker-ice-candidate', {
-        targetId: data.sharerId,
-        candidate: candidate.toJSON(),
-      })
-    },
-    onTrack: (event) => {
-      const session = workerSessions.value.get(data.sessionId)
-      if (session) {
-        session.stream = event.streams[0]
-        workerSessions.value.set(data.sessionId, { ...session })
-      }
-    },
-  })
-
-  workerPeerConnections.set(data.sessionId, pc)
-
-  await setRemoteDescription(pc, data.offer)
-  const answer = await createAnswer(pc)
-  socket.emit('worker-answer', {
-    sharerId: data.sharerId,
-    answer,
-  })
-})
-
-socket.on('worker-answer', async (data: { viewerId: string; answer: RTCSessionDescriptionInit }) => {
-  const pc = peerConnections.get(`worker-${data.viewerId}`)
-  if (pc) {
-    await setRemoteDescription(pc, data.answer)
-  }
-})
-
-socket.on('worker-ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
-  // Check if this is from a worker we're viewing
-  const sessionId = workerSharerIdToSessionId.get(data.fromId)
-  if (sessionId) {
-    const pc = workerPeerConnections.get(sessionId)
-    if (pc) {
-      try {
-        await addIceCandidate(pc, data.candidate)
-      } catch {
-        // ICE candidate might arrive before remote description
-      }
-    }
-    return
-  }
-
-  // Check if this is from a worker viewing us
-  const pc = peerConnections.get(`worker-${data.fromId}`)
-  if (pc) {
-    try {
-      await addIceCandidate(pc, data.candidate)
-    } catch {
-      // ICE candidate might arrive before remote description
-    }
   }
 })
 
@@ -743,12 +615,18 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (status.value === 'sharing') {
+  // Only cleanup if we're NOT redirecting to worker dashboard
+  // (workerTransitioning flag indicates we're transitioning)
+  const isTransitioningToWorkerDashboard = !!sessionStorage.getItem('workerTransitioning')
+
+  if (!isTransitioningToWorkerDashboard && status.value === 'sharing') {
     stopSharing()
   }
   cleanupVoiceCall()
-  cleanupWorkerDashboard()
-  disconnectSocket()
+  // Don't disconnect socket - worker dashboard will use it
+  if (!isTransitioningToWorkerDashboard) {
+    disconnectSocket()
+  }
 })
 </script>
 
@@ -955,8 +833,8 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Status -->
-        <p :class="['text-center mb-4 font-medium', statusColor]">
+        <!-- Status (hide when sharing since media type indicator shows it) -->
+        <p v-if="status !== 'sharing'" :class="['text-center mb-4 font-medium', statusColor]">
           {{ statusText }}
         </p>
 
@@ -982,27 +860,5 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Worker Dashboard - View other workers' screens -->
-    <div
-      v-if="status === 'sharing' && workerDashboardEnabled && workerSessionList.length > 0"
-      class="mt-6 w-full max-w-4xl"
-    >
-      <div class="bg-white rounded-xl shadow-lg p-4">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-          </svg>
-          Other Workers ({{ workerSessionList.length }})
-        </h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <WorkerTile
-            v-for="session in workerSessionList"
-            :key="session.sessionId"
-            :name="session.name"
-            :stream="session.stream"
-          />
-        </div>
-      </div>
-    </div>
   </div>
 </template>

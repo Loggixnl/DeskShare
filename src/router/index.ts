@@ -32,6 +32,11 @@ const router = createRouter({
       component: () => import('@/views/DashboardPage.vue'),
       meta: { requiresAuth: true },
     },
+    {
+      path: '/dashboard/worker/:token',
+      name: 'worker-dashboard',
+      component: () => import('@/views/WorkerDashboardPage.vue'),
+    },
   ],
 })
 

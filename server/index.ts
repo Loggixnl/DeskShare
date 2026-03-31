@@ -288,32 +288,49 @@ io.on('connection', (socket) => {
     socket.emit('share-ready', { token, sessionId })
   })
 
-  // Dashboard viewer joins - now requires JWT auth
-  socket.on('join-dashboard', async (data: { token: string }) => {
-    const { token: jwtToken } = data
+  // Dashboard viewer joins - accepts JWT (admin) or share token (worker)
+  socket.on('join-dashboard', async (data: { token: string; asWorker?: boolean; workerSessionId?: string }) => {
+    const { token: authToken, asWorker, workerSessionId } = data
 
-    // Verify JWT
-    const admin = await verifySocketToken(jwtToken)
-    if (!admin) {
-      console.log(`[Dashboard] Invalid auth token for ${socket.id}`)
-      socket.emit('dashboard-error', { error: 'Authentication required' })
-      return
+    let shareToken: string
+
+    if (asWorker) {
+      // Worker joining dashboard - validate share token
+      const validToken = await isValidShareToken(authToken)
+      if (!validToken) {
+        console.log(`[Dashboard] Invalid share token for worker ${socket.id}`)
+        socket.emit('dashboard-error', { error: 'Invalid share link' })
+        return
+      }
+      shareToken = authToken
+      console.log(`[Dashboard] Worker viewer joined: ${socket.id} (session: ${workerSessionId})`)
+    } else {
+      // Admin joining dashboard - verify JWT
+      const admin = await verifySocketToken(authToken)
+      if (!admin) {
+        console.log(`[Dashboard] Invalid auth token for ${socket.id}`)
+        socket.emit('dashboard-error', { error: 'Authentication required' })
+        return
+      }
+      shareToken = admin.share_token
+      console.log(`[Dashboard] Admin viewer joined: ${socket.id} (admin: ${admin.email})`)
     }
 
-    console.log(`[Dashboard] Viewer joined: ${socket.id} (admin: ${admin.email})`)
     socket.join('dashboard')
     dashboardViewers.set(socket.id, {
       socketId: socket.id,
-      shareToken: admin.share_token,
+      shareToken,
     })
 
-    // Send only sessions for this admin's share token
-    const sessions = getSessionsForToken(admin.share_token).map((s) => ({
-      sessionId: s.sessionId,
-      token: s.shareToken,
-      name: s.name,
-      startedAt: s.startedAt,
-    }))
+    // Send only sessions for this share token (excluding worker's own session if applicable)
+    const sessions = getSessionsForToken(shareToken)
+      .filter((s) => !workerSessionId || s.sessionId !== workerSessionId)
+      .map((s) => ({
+        sessionId: s.sessionId,
+        token: s.shareToken,
+        name: s.name,
+        startedAt: s.startedAt,
+      }))
     socket.emit('active-sessions', sessions)
   })
 
@@ -543,6 +560,15 @@ io.on('connection', (socket) => {
       fromId: socket.id,
       candidate: data.candidate,
     })
+  })
+
+  // Admin requests specific worker to change media type
+  socket.on('request-worker-media-change', (data: { sessionId: string; mediaType: 'screen' | 'webcam' }) => {
+    const session = activeSessions.get(data.sessionId)
+    if (session) {
+      console.log(`[Media] Admin requesting session ${data.sessionId} to change to ${data.mediaType}`)
+      io.to(session.socketId).emit('media-type-changed', { mediaType: data.mediaType })
+    }
   })
 
   // Handle disconnect

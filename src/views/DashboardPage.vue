@@ -12,7 +12,7 @@ import {
 } from '@/lib/webrtc'
 import type { ActiveSession } from '@/lib/types'
 import ScreenTile from '@/components/ScreenTile.vue'
-import { currentAdmin, authToken, logout, getShareUrl, setWorkerDashboardEnabled, setMediaType } from '@/lib/auth'
+import { currentAdmin, authToken, logout, getShareUrl, setMediaType } from '@/lib/auth'
 import type { MediaType } from '@/lib/auth'
 
 const router = useRouter()
@@ -25,6 +25,8 @@ const sharerIdToSessionId = new Map<string, string>()
 
 // Voice call state - keyed by sessionId
 const callStatus = ref<Map<string, 'idle' | 'calling' | 'connected'>>(new Map())
+// Per-worker media type - keyed by sessionId
+const workerMediaTypes = ref<Map<string, 'screen' | 'webcam'>>(new Map())
 const voicePeerConnections = new Map<string, RTCPeerConnection>()
 const remoteAudioElements = new Map<string, HTMLAudioElement>()
 const localAudioStream = ref<MediaStream | null>(null)
@@ -33,20 +35,6 @@ const workerIdBySessionId = new Map<string, string>()
 // Share link state
 const shareLink = computed(() => currentAdmin.value ? getShareUrl(currentAdmin.value.shareToken) : '')
 const linkCopied = ref(false)
-
-// Worker dashboard toggle
-const workerDashboardEnabled = ref(currentAdmin.value?.workerDashboardEnabled ?? false)
-const workerDashboardLoading = ref(false)
-
-async function toggleWorkerDashboard() {
-  workerDashboardLoading.value = true
-  const newValue = !workerDashboardEnabled.value
-  const success = await setWorkerDashboardEnabled(newValue)
-  if (success) {
-    workerDashboardEnabled.value = newValue
-  }
-  workerDashboardLoading.value = false
-}
 
 // Media type toggle (screen vs webcam)
 const currentMediaType = ref<MediaType>(currentAdmin.value?.mediaType ?? 'screen')
@@ -122,6 +110,18 @@ function stopRingtone() {
 
 function getCallStatus(sessionId: string): 'idle' | 'calling' | 'connected' {
   return callStatus.value.get(sessionId) || 'idle'
+}
+
+function getWorkerMediaType(sessionId: string): 'screen' | 'webcam' {
+  return workerMediaTypes.value.get(sessionId) || currentMediaType.value
+}
+
+function requestWorkerMediaChange(sessionId: string, newType: 'screen' | 'webcam') {
+  console.log(`[Dashboard] Requesting worker ${sessionId} to change to ${newType}`)
+  socket.emit('request-worker-media-change', { sessionId, mediaType: newType })
+  // Optimistically update local state
+  workerMediaTypes.value.set(sessionId, newType)
+  workerMediaTypes.value = new Map(workerMediaTypes.value)
 }
 
 async function acceptWorkerCall() {
@@ -630,27 +630,6 @@ onUnmounted(() => {
             {{ currentMediaType === 'screen' ? 'Screen' : 'Webcam' }}
           </button>
         </div>
-        <span class="text-gray-600">|</span>
-        <!-- Worker Dashboard Toggle -->
-        <div class="flex items-center gap-2">
-          <span class="text-gray-400 text-sm">Workers see each other:</span>
-          <button
-            @click="toggleWorkerDashboard"
-            :disabled="workerDashboardLoading"
-            :class="[
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
-              workerDashboardEnabled ? 'bg-blue-600' : 'bg-gray-600',
-              workerDashboardLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-            ]"
-          >
-            <span
-              :class="[
-                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                workerDashboardEnabled ? 'translate-x-6' : 'translate-x-1'
-              ]"
-            />
-          </button>
-        </div>
       </div>
     </div>
 
@@ -678,10 +657,12 @@ onUnmounted(() => {
           :key="session.sessionId"
           :session="session"
           :call-status="getCallStatus(session.sessionId || '')"
+          :worker-media-type="getWorkerMediaType(session.sessionId || '')"
           @focus="focusSession(session.sessionId || '')"
           @call="initiateCall(session.sessionId || '')"
           @hangup="endCall(session.sessionId || '')"
           @cancel-call="cancelCall(session.sessionId || '')"
+          @toggle-media="requestWorkerMediaChange"
         />
       </div>
     </main>
