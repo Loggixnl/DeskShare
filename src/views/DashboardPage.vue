@@ -32,6 +32,10 @@ const remoteAudioElements = new Map<string, HTMLAudioElement>()
 const localAudioStream = ref<MediaStream | null>(null)
 const workerIdBySessionId = new Map<string, string>()
 
+// Admin's own webcam state (turns on when requesting worker webcam)
+const adminWebcamStream = ref<MediaStream | null>(null)
+const adminWebcamVideoElement = ref<HTMLVideoElement | null>(null)
+
 // Share link state
 const shareLink = computed(() => currentAdmin.value ? getShareUrl(currentAdmin.value.shareToken) : '')
 const linkCopied = ref(false)
@@ -116,12 +120,42 @@ function getWorkerMediaType(sessionId: string): 'screen' | 'webcam' {
   return workerMediaTypes.value.get(sessionId) || currentMediaType.value
 }
 
-function requestWorkerMediaChange(sessionId: string, newType: 'screen' | 'webcam') {
+async function startAdminWebcam() {
+  if (adminWebcamStream.value) return // Already on
+
+  try {
+    adminWebcamStream.value = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false
+    })
+    // Video element is updated by the watch on adminWebcamStream
+  } catch (err) {
+    console.error('[Admin Webcam] Failed to start:', err)
+    alert('Could not access webcam. Please allow webcam access.')
+  }
+}
+
+function stopAdminWebcam() {
+  if (adminWebcamStream.value) {
+    adminWebcamStream.value.getTracks().forEach(track => track.stop())
+    adminWebcamStream.value = null
+  }
+  if (adminWebcamVideoElement.value) {
+    adminWebcamVideoElement.value.srcObject = null
+  }
+}
+
+async function requestWorkerMediaChange(sessionId: string, newType: 'screen' | 'webcam') {
   console.log(`[Dashboard] Requesting worker ${sessionId} to change to ${newType}`)
   socket.emit('request-worker-media-change', { sessionId, mediaType: newType })
   // Optimistically update local state
   workerMediaTypes.value.set(sessionId, newType)
   workerMediaTypes.value = new Map(workerMediaTypes.value)
+
+  // If requesting webcam, also turn on admin's webcam
+  if (newType === 'webcam') {
+    await startAdminWebcam()
+  }
 }
 
 async function acceptWorkerCall() {
@@ -282,6 +316,14 @@ watch(
     }
   }
 )
+
+// Watch admin webcam stream to update video element
+watch(adminWebcamStream, async (stream) => {
+  await nextTick()
+  if (adminWebcamVideoElement.value) {
+    adminWebcamVideoElement.value.srcObject = stream
+  }
+})
 
 const socket = getSocket()
 
@@ -526,6 +568,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopRingtone()
+  stopAdminWebcam()
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
   voicePeerConnections.forEach((pc) => closePeerConnection(pc))
@@ -700,6 +743,34 @@ onUnmounted(() => {
             </span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Admin webcam preview (floating in corner) -->
+    <div
+      v-if="adminWebcamStream"
+      class="fixed bottom-4 right-4 z-40 bg-gray-800 rounded-lg shadow-xl overflow-hidden"
+    >
+      <div class="relative w-48">
+        <video
+          ref="adminWebcamVideoElement"
+          autoplay
+          playsinline
+          muted
+          class="w-full aspect-video object-cover"
+        ></video>
+        <div class="absolute top-1 left-1 bg-purple-600 text-white text-xs px-2 py-0.5 rounded">
+          Your Webcam
+        </div>
+        <button
+          @click="stopAdminWebcam"
+          class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white p-1 rounded transition"
+          title="Close webcam"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
     </div>
   </div>
