@@ -70,6 +70,30 @@ const socket = getSocket()
 
 const sessionList = computed(() => Array.from(sessions.value.values()))
 
+// Own session for display in the grid
+const ownSession = computed<ActiveSession | null>(() => {
+  if (!workerStream.value || !workerSessionId.value) return null
+  return {
+    sessionId: workerSessionId.value,
+    token: workerToken.value || '',
+    name: workerName.value || 'Me',
+    startedAt: new Date(),
+    stream: workerStream.value,
+    connectionState: 'connected',
+  }
+})
+
+// Video element for own tile
+const ownVideoElement = ref<HTMLVideoElement | null>(null)
+
+// Watch own stream to update video element
+watch(workerStream, async (stream) => {
+  await nextTick()
+  if (ownVideoElement.value) {
+    ownVideoElement.value.srcObject = stream
+  }
+}, { immediate: true })
+
 // Ringtone
 function playRingtone() {
   try {
@@ -423,13 +447,18 @@ socket.on('call-ended', () => {
   cleanupVoiceCall()
 })
 
-// Handle media type change from admin
+// Handle media type change from admin (legacy - admin can no longer control this)
 socket.on('media-type-changed', async (data: { mediaType: 'screen' | 'webcam' }) => {
-  console.log('[Media] Admin changed media type to:', data.mediaType)
-  if (data.mediaType !== workerMediaType.value) {
-    await switchMedia(data.mediaType)
-  }
+  console.log('[Media] Received media type change request:', data.mediaType)
+  // We no longer automatically switch - worker controls their own media
 })
+
+// Handle toggle from own tile
+async function handleOwnMediaToggle(_sessionId: string, newType: 'screen' | 'webcam') {
+  if (newType !== workerMediaType.value) {
+    await switchMedia(newType)
+  }
+}
 
 async function switchMedia(type: 'screen' | 'webcam') {
   if (!workerStream.value) return
@@ -437,19 +466,33 @@ async function switchMedia(type: 'screen' | 'webcam') {
   const oldStream = workerStream.value
   const oldMediaType = workerMediaType.value
 
+  if (type === oldMediaType) {
+    console.log(`[Media] Already on ${type}, nothing to do`)
+    return
+  }
+
   try {
     console.log(`[Media] Switching from ${oldMediaType} to ${type}`)
 
     // Get new stream based on type
-    const newStream = type === 'screen'
-      ? await getDisplayMedia()
-      : await getUserMediaVideo()
+    let newStream: MediaStream
+    try {
+      newStream = type === 'screen'
+        ? await getDisplayMedia()
+        : await getUserMediaVideo()
+    } catch (err) {
+      console.error('[Media] Failed to get new stream:', err)
+      if (err instanceof Error && err.name === 'NotAllowedError') {
+        console.log('[Media] User cancelled media picker, keeping current media')
+      }
+      return // Don't stop old stream if we couldn't get new one
+    }
 
-    // Successfully got new stream - now stop old stream tracks
+    // Successfully got new stream - NOW stop old stream tracks
     console.log('[Media] Stopping old stream tracks')
     oldStream.getTracks().forEach(track => {
       track.stop()
-      console.log(`[Media] Stopped track: ${track.kind}`)
+      console.log(`[Media] Stopped track: ${track.kind} (${track.label})`)
     })
 
     // Update worker state
@@ -483,11 +526,7 @@ async function switchMedia(type: 'screen' | 'webcam') {
 
     console.log(`[Media] Successfully switched to ${type}`)
   } catch (err) {
-    console.error('[Media] Failed to switch:', err)
-    // Keep the old stream active if switch failed
-    if (err instanceof Error && err.name === 'NotAllowedError') {
-      console.log('[Media] User cancelled media picker, keeping current media')
-    }
+    console.error('[Media] Unexpected error during switch:', err)
   }
 }
 
@@ -564,23 +603,11 @@ onUnmounted(() => {
         <h1 class="text-xl font-bold text-white">DeskShare Dashboard</h1>
         <div class="flex items-center gap-4">
           <span class="text-gray-400">
-            <span class="text-white font-semibold">{{ sessionList.length }}</span>
-            other {{ sessionList.length === 1 ? 'worker' : 'workers' }}
+            <span class="text-white font-semibold">{{ sessionList.length + 1 }}</span>
+            {{ sessionList.length + 1 === 1 ? 'worker' : 'workers' }} sharing
           </span>
           <span class="text-gray-500">|</span>
-          <span class="text-gray-400 text-sm">Sharing as: <span class="text-white">{{ workerName }}</span></span>
-          <span class="text-gray-500">|</span>
-          <!-- Media type indicator -->
-          <span
-            :class="[
-              'px-2 py-1 rounded text-xs font-medium',
-              workerMediaType === 'screen'
-                ? 'bg-blue-600 text-white'
-                : 'bg-purple-600 text-white'
-            ]"
-          >
-            {{ workerMediaType === 'screen' ? 'Screen' : 'Webcam' }}
-          </span>
+          <span class="text-gray-400 text-sm">You: <span class="text-white">{{ workerName }}</span></span>
           <!-- Voice call indicator -->
           <div
             v-if="currentCallerId"
@@ -610,23 +637,66 @@ onUnmounted(() => {
 
     <!-- Grid of screens -->
     <main class="p-6">
-      <!-- Empty state -->
-      <div
-        v-if="sessionList.length === 0"
-        class="flex flex-col items-center justify-center py-20 text-gray-500"
-      >
-        <svg class="w-20 h-20 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-        </svg>
-        <p class="text-lg">No other workers sharing</p>
-        <p class="text-sm mt-1">You'll see other workers' screens here when they join</p>
-      </div>
+      <!-- Screen grid (always show - own tile is always present) -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <!-- Own tile (first, with special styling) -->
+        <div v-if="ownSession" class="bg-gray-800 rounded-lg overflow-hidden ring-2 ring-blue-500">
+          <!-- Video container -->
+          <div class="aspect-video bg-gray-900 relative">
+            <video
+              ref="ownVideoElement"
+              autoplay
+              playsinline
+              muted
+              class="w-full h-full object-contain"
+            ></video>
+            <!-- "You" badge -->
+            <div class="absolute top-2 left-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded font-medium">
+              You
+            </div>
+          </div>
+          <!-- Info bar -->
+          <div class="p-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                <span class="text-white font-medium text-sm truncate max-w-[120px]">
+                  {{ workerName }} (You)
+                </span>
+              </div>
+            </div>
+            <!-- Media type toggle (only on own tile) -->
+            <div class="mt-2 flex items-center justify-between">
+              <span class="text-gray-400 text-xs">Share:</span>
+              <div class="flex gap-1">
+                <button
+                  @click="handleOwnMediaToggle(workerSessionId || '', 'screen')"
+                  :class="[
+                    'px-2 py-0.5 rounded text-xs font-medium transition',
+                    workerMediaType === 'screen'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  ]"
+                >
+                  Screen
+                </button>
+                <button
+                  @click="handleOwnMediaToggle(workerSessionId || '', 'webcam')"
+                  :class="[
+                    'px-2 py-0.5 rounded text-xs font-medium transition',
+                    workerMediaType === 'webcam'
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  ]"
+                >
+                  Webcam
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
 
-      <!-- Screen grid -->
-      <div
-        v-else
-        class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
-      >
+        <!-- Other workers' tiles -->
         <ScreenTile
           v-for="session in sessionList"
           :key="session.sessionId"
@@ -636,6 +706,14 @@ onUnmounted(() => {
           :hide-media-toggle="true"
           @focus="focusSession(session.sessionId || '')"
         />
+      </div>
+
+      <!-- Empty state for other workers -->
+      <div
+        v-if="sessionList.length === 0"
+        class="mt-8 text-center text-gray-500"
+      >
+        <p class="text-sm">No other workers sharing yet</p>
       </div>
     </main>
 
