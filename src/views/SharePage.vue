@@ -197,7 +197,15 @@ socket.on('share-ready', (data: { token: string; sessionId: string }) => {
       workerName.value.trim(),
       mediaType.value
     )
+    // Clear local ref so SharePage's handlers don't interfere
+    // The stream is now owned by workerState
+    localStream.value = null
   }
+
+  // Remove socket handlers that would conflict with WorkerDashboardPage
+  socket.off('viewer-joined')
+  socket.off('answer')
+  socket.off('ice-candidate')
 
   // Mark that we're transitioning so onUnmounted doesn't cleanup
   sessionStorage.setItem('workerTransitioning', 'true')

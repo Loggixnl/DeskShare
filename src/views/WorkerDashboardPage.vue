@@ -233,6 +233,7 @@ socket.on('offer', async (data: { sharerId: string; offer: RTCSessionDescription
 
 // Handle ICE candidate
 socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
+  // Check if this is from a worker we're viewing
   const sessionId = sharerIdToSessionId.get(data.fromId)
   if (sessionId) {
     const pc = peerConnections.get(sessionId)
@@ -242,6 +243,17 @@ socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandi
       } catch {
         // ICE candidate might arrive before remote description
       }
+    }
+    return
+  }
+
+  // Check if this is from a viewer watching us
+  const viewerPc = workerPeerConnections.get(data.fromId)
+  if (viewerPc) {
+    try {
+      await addIceCandidate(viewerPc, data.candidate)
+    } catch {
+      // ICE candidate might arrive before remote description
     }
   }
 })
