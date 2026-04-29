@@ -18,7 +18,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: true, // Allow all origins for easier deployment
     methods: ['GET', 'POST'],
   },
 })

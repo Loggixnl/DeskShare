@@ -45,9 +45,8 @@ const socket = getSocket()
 const sessionList = computed(() => Array.from(sessions.value.values()))
 
 function authenticate() {
-  // For MVP, just check against a simple password
-  // In production, this should validate against env var on server
-  const validPassword = 'admin' // Change in production
+  // Simple password check - defaults to 'admin' if not set
+  const validPassword = import.meta.env.VITE_DASHBOARD_PASSWORD || 'admin'
   if (password.value === validPassword) {
     isAuthenticated.value = true
     authError.value = ''
