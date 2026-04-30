@@ -61,8 +61,8 @@ function initDashboard() {
   socket.emit('join-dashboard')
 }
 
-// Handle receiving active sessions on join
-socket.on('active-sessions', (data: Array<{ sessionId: string; token: string; name: string; startedAt: string }>) => {
+// Socket event handlers (named functions for proper cleanup)
+function handleActiveSessions(data: Array<{ sessionId: string; token: string; name: string; startedAt: string }>) {
   data.forEach((session) => {
     sessions.value.set(session.sessionId, {
       sessionId: session.sessionId,
@@ -73,10 +73,9 @@ socket.on('active-sessions', (data: Array<{ sessionId: string; token: string; na
     // Request offer from each active session
     socket.emit('request-offer', { sessionId: session.sessionId })
   })
-})
+}
 
-// Handle new session joining
-socket.on('session-joined', (data: { sessionId: string; token: string; name: string; startedAt: string }) => {
+function handleSessionJoined(data: { sessionId: string; token: string; name: string; startedAt: string }) {
   sessions.value.set(data.sessionId, {
     sessionId: data.sessionId,
     token: data.token,
@@ -85,10 +84,9 @@ socket.on('session-joined', (data: { sessionId: string; token: string; name: str
   })
   // Request offer from new session
   socket.emit('request-offer', { sessionId: data.sessionId })
-})
+}
 
-// Handle session leaving
-socket.on('session-left', (data: { sessionId: string }) => {
+function handleSessionLeft(data: { sessionId: string }) {
   sessions.value.delete(data.sessionId)
   const pc = peerConnections.get(data.sessionId)
   if (pc) {
@@ -100,51 +98,61 @@ socket.on('session-left', (data: { sessionId: string }) => {
   if (focusedSessionId.value === data.sessionId) {
     focusedSessionId.value = null
   }
-})
+}
+
+socket.on('active-sessions', handleActiveSessions)
+socket.on('session-joined', handleSessionJoined)
+socket.on('session-left', handleSessionLeft)
 
 // Handle offer from sharer
-socket.on(
-  'offer',
-  async (data: { sharerId: string; sessionId: string; offer: RTCSessionDescriptionInit }) => {
-    // Store mapping for ICE candidate routing (sharerId is same as sessionId)
-    sharerIdToSession.set(data.sharerId, data.sessionId)
-
-    const pc = createPeerConnection({
-      onIceCandidate: (candidate) => {
-        socket.emit('ice-candidate', {
-          targetId: data.sharerId,
-          candidate: candidate.toJSON(),
-        })
-      },
-      onTrack: (event) => {
-        const session = sessions.value.get(data.sessionId)
-        if (session) {
-          session.stream = event.streams[0]
-          sessions.value.set(data.sessionId, { ...session })
-        }
-      },
-      onConnectionStateChange: (state) => {
-        const session = sessions.value.get(data.sessionId)
-        if (session) {
-          session.connectionState = state
-          sessions.value.set(data.sessionId, { ...session })
-        }
-      },
-    })
-
-    peerConnections.set(data.sessionId, pc)
-
-    await setRemoteDescription(pc, data.offer)
-    const answer = await createAnswer(pc)
-    socket.emit('answer', {
-      sharerId: data.sharerId,
-      answer,
-    })
+async function handleOffer(data: { sharerId: string; sessionId: string; offer: RTCSessionDescriptionInit }) {
+  // Close any existing peer connection for this session first
+  const existingPc = peerConnections.get(data.sessionId)
+  if (existingPc) {
+    closePeerConnection(existingPc)
+    peerConnections.delete(data.sessionId)
   }
-)
+
+  // Store mapping for ICE candidate routing (sharerId is same as sessionId)
+  sharerIdToSession.set(data.sharerId, data.sessionId)
+
+  const pc = createPeerConnection({
+    onIceCandidate: (candidate) => {
+      socket.emit('ice-candidate', {
+        targetId: data.sharerId,
+        candidate: candidate.toJSON(),
+      })
+    },
+    onTrack: (event) => {
+      const session = sessions.value.get(data.sessionId)
+      if (session) {
+        session.stream = event.streams[0]
+        sessions.value.set(data.sessionId, { ...session })
+      }
+    },
+    onConnectionStateChange: (state) => {
+      const session = sessions.value.get(data.sessionId)
+      if (session) {
+        session.connectionState = state
+        sessions.value.set(data.sessionId, { ...session })
+      }
+    },
+  })
+
+  peerConnections.set(data.sessionId, pc)
+
+  await setRemoteDescription(pc, data.offer)
+  const answer = await createAnswer(pc)
+  socket.emit('answer', {
+    sharerId: data.sharerId,
+    answer,
+  })
+}
+
+socket.on('offer', handleOffer)
 
 // Handle ICE candidate from sharer
-socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
+async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandidateInit }) {
   // Find the correct peer connection using the sharer ID mapping
   const sessionId = sharerIdToSession.get(data.fromId)
   if (sessionId) {
@@ -157,7 +165,9 @@ socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandi
       }
     }
   }
-})
+}
+
+socket.on('ice-candidate', handleIceCandidate)
 
 function focusSession(sessionId: string) {
   focusedSessionId.value = sessionId
@@ -177,6 +187,13 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // Clean up socket event handlers to prevent duplicates on remount
+  socket.off('active-sessions', handleActiveSessions)
+  socket.off('session-joined', handleSessionJoined)
+  socket.off('session-left', handleSessionLeft)
+  socket.off('offer', handleOffer)
+  socket.off('ice-candidate', handleIceCandidate)
+
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
   sharerIdToSession.clear()
