@@ -7,9 +7,42 @@ export interface PeerConnectionCallbacks {
 export function getIceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = []
 
-  // Add STUN server
+  // Add STUN servers (multiple for redundancy)
   const stunUrl = import.meta.env.VITE_STUN_URL || 'stun:stun.l.google.com:19302'
   servers.push({ urls: stunUrl })
+  servers.push({ urls: 'stun:stun1.l.google.com:19302' })
+  servers.push({ urls: 'stun:stun2.l.google.com:19302' })
+
+  // Add TURN server if configured via environment
+  const turnUrl = import.meta.env.VITE_TURN_URL
+  const turnUsername = import.meta.env.VITE_TURN_USERNAME
+  const turnPassword = import.meta.env.VITE_TURN_PASSWORD
+
+  if (turnUrl && turnUsername && turnPassword) {
+    servers.push({
+      urls: turnUrl,
+      username: turnUsername,
+      credential: turnPassword,
+    })
+  } else {
+    // Use free OpenRelay TURN servers from Metered as fallback
+    // These are free public TURN servers for NAT traversal
+    servers.push({
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    })
+    servers.push({
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    })
+    servers.push({
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    })
+  }
 
   return servers
 }
