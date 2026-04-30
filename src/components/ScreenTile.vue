@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onUnmounted, watch, nextTick } from 'vue'
 import type { ActiveSession } from '@/lib/types'
 
 const props = defineProps<{
@@ -25,21 +25,31 @@ function formatTime(date: Date): string {
   return new Date(date).toLocaleTimeString()
 }
 
+// Watch for stream changes with proper async handling
 watch(
   () => props.session.stream,
-  (stream) => {
-    if (videoElement.value && stream) {
-      videoElement.value.srcObject = stream
+  async (stream) => {
+    // Wait for DOM to be ready
+    await nextTick()
+
+    if (!videoElement.value) return
+
+    if (stream) {
+      try {
+        videoElement.value.srcObject = stream
+        // Ensure video plays
+        await videoElement.value.play().catch(() => {
+          // Autoplay might be blocked, but srcObject is set
+        })
+      } catch (err) {
+        console.error('Failed to set video stream:', err)
+      }
+    } else {
+      videoElement.value.srcObject = null
     }
   },
   { immediate: true }
 )
-
-onMounted(() => {
-  if (videoElement.value && props.session.stream) {
-    videoElement.value.srcObject = props.session.stream
-  }
-})
 
 onUnmounted(() => {
   if (videoElement.value) {

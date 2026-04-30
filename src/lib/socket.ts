@@ -8,6 +8,9 @@ export function getSocket(): Socket {
   if (!socket) {
     socket = io(SIGNALING_SERVER, {
       autoConnect: false,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     })
   }
   return socket
@@ -22,6 +25,8 @@ export function connectSocket(): void {
 
 export function disconnectSocket(): void {
   if (socket) {
+    socket.removeAllListeners()
     socket.disconnect()
+    socket = null  // Reset so next getSocket creates fresh instance
   }
 }

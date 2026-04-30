@@ -19,8 +19,6 @@ const authError = ref('')
 // Sessions state (keyed by sessionId)
 const sessions = ref<Map<string, ActiveSession>>(new Map())
 const peerConnections = new Map<string, RTCPeerConnection>()
-// Map sharer socket IDs to sessionIds for ICE candidate routing
-const sharerIdToSession = new Map<string, string>()
 // Buffer ICE candidates that arrive before remote description is set
 const pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>()
 
@@ -42,7 +40,7 @@ watch(
   }
 )
 
-const socket = getSocket()
+let socket = getSocket()
 
 const sessionList = computed(() => Array.from(sessions.value.values()))
 
@@ -58,12 +56,30 @@ function authenticate() {
   }
 }
 
+// Helper to update session atomically (prevents race conditions)
+function updateSession(sessionId: string, updates: Partial<ActiveSession>) {
+  const current = sessions.value.get(sessionId)
+  if (current) {
+    sessions.value.set(sessionId, { ...current, ...updates })
+  }
+}
+
 function initDashboard() {
+  // Get fresh socket instance
+  socket = getSocket()
+
+  // Register all socket handlers
+  socket.on('active-sessions', handleActiveSessions)
+  socket.on('session-joined', handleSessionJoined)
+  socket.on('session-left', handleSessionLeft)
+  socket.on('offer', handleOffer)
+  socket.on('ice-candidate', handleIceCandidate)
+
   connectSocket()
   socket.emit('join-dashboard')
 }
 
-// Socket event handlers (named functions for proper cleanup)
+// Socket event handlers
 function handleActiveSessions(data: Array<{ sessionId: string; token: string; name: string; startedAt: string }>) {
   data.forEach((session) => {
     sessions.value.set(session.sessionId, {
@@ -72,8 +88,10 @@ function handleActiveSessions(data: Array<{ sessionId: string; token: string; na
       name: session.name,
       startedAt: new Date(session.startedAt),
     })
-    // Request offer from each active session
-    socket.emit('request-offer', { sessionId: session.sessionId })
+    // Request offer from each active session with small delay to prevent flooding
+    setTimeout(() => {
+      socket.emit('request-offer', { sessionId: session.sessionId })
+    }, 100 * data.indexOf(session))
   })
 }
 
@@ -90,34 +108,29 @@ function handleSessionJoined(data: { sessionId: string; token: string; name: str
 
 function handleSessionLeft(data: { sessionId: string }) {
   sessions.value.delete(data.sessionId)
+  pendingIceCandidates.delete(data.sessionId)
   const pc = peerConnections.get(data.sessionId)
   if (pc) {
     closePeerConnection(pc)
     peerConnections.delete(data.sessionId)
   }
-  // Clean up sharer ID mapping
-  sharerIdToSession.delete(data.sessionId)
   if (focusedSessionId.value === data.sessionId) {
     focusedSessionId.value = null
   }
 }
 
-socket.on('active-sessions', handleActiveSessions)
-socket.on('session-joined', handleSessionJoined)
-socket.on('session-left', handleSessionLeft)
-
 // Handle offer from sharer
 async function handleOffer(data: { sharerId: string; sessionId: string; offer: RTCSessionDescriptionInit }) {
+  const sessionId = data.sessionId
+
   // Close any existing peer connection for this session first
-  const existingPc = peerConnections.get(data.sessionId)
+  const existingPc = peerConnections.get(sessionId)
   if (existingPc) {
     closePeerConnection(existingPc)
-    peerConnections.delete(data.sessionId)
+    peerConnections.delete(sessionId)
   }
 
-  // Store mapping for ICE candidate routing (sharerId is same as sessionId)
-  sharerIdToSession.set(data.sharerId, data.sessionId)
-
+  // Create peer connection with callbacks that capture sessionId
   const pc = createPeerConnection({
     onIceCandidate: (candidate) => {
       socket.emit('ice-candidate', {
@@ -126,45 +139,43 @@ async function handleOffer(data: { sharerId: string; sessionId: string; offer: R
       })
     },
     onTrack: (event) => {
-      const session = sessions.value.get(data.sessionId)
-      if (session) {
-        session.stream = event.streams[0]
-        sessions.value.set(data.sessionId, { ...session })
-      }
+      // Atomic update to prevent race conditions
+      updateSession(sessionId, { stream: event.streams[0] })
     },
     onConnectionStateChange: (state) => {
-      const session = sessions.value.get(data.sessionId)
-      if (session) {
-        session.connectionState = state
-        sessions.value.set(data.sessionId, { ...session })
-      }
+      // Atomic update to prevent race conditions
+      updateSession(sessionId, { connectionState: state })
     },
   })
 
-  peerConnections.set(data.sessionId, pc)
+  peerConnections.set(sessionId, pc)
 
-  await setRemoteDescription(pc, data.offer)
-  const answer = await createAnswer(pc)
-  socket.emit('answer', {
-    sharerId: data.sharerId,
-    answer,
-  })
+  try {
+    await setRemoteDescription(pc, data.offer)
+    const answer = await createAnswer(pc)
+    socket.emit('answer', {
+      sharerId: data.sharerId,
+      answer,
+    })
 
-  // Apply any pending ICE candidates that arrived before the offer
-  const pending = pendingIceCandidates.get(data.sessionId)
-  if (pending && pending.length > 0) {
-    for (const candidate of pending) {
-      try {
-        await addIceCandidate(pc, candidate)
-      } catch {
-        // Ignore errors
+    // Apply any pending ICE candidates that arrived before the offer
+    const pending = pendingIceCandidates.get(sessionId)
+    if (pending && pending.length > 0) {
+      for (const candidate of pending) {
+        try {
+          await addIceCandidate(pc, candidate)
+        } catch {
+          // Ignore errors
+        }
       }
+      pendingIceCandidates.delete(sessionId)
     }
-    pendingIceCandidates.delete(data.sessionId)
+  } catch (err) {
+    console.error(`Failed to handle offer for ${sessionId}:`, err)
+    closePeerConnection(pc)
+    peerConnections.delete(sessionId)
   }
 }
-
-socket.on('offer', handleOffer)
 
 // Handle ICE candidate from sharer
 async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandidateInit }) {
@@ -187,8 +198,6 @@ async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandi
   }
 }
 
-socket.on('ice-candidate', handleIceCandidate)
-
 function focusSession(sessionId: string) {
   focusedSessionId.value = sessionId
 }
@@ -207,17 +216,12 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // Clean up socket event handlers to prevent duplicates on remount
-  socket.off('active-sessions', handleActiveSessions)
-  socket.off('session-joined', handleSessionJoined)
-  socket.off('session-left', handleSessionLeft)
-  socket.off('offer', handleOffer)
-  socket.off('ice-candidate', handleIceCandidate)
-
+  // Clean up peer connections
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
-  sharerIdToSession.clear()
   pendingIceCandidates.clear()
+
+  // Disconnect socket (this also removes all listeners)
   disconnectSocket()
 })
 

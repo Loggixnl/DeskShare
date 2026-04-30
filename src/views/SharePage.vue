@@ -30,7 +30,7 @@ const peerConnections = new Map<string, RTCPeerConnection>()
 // Buffer ICE candidates that arrive before remote description is set
 const pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>()
 
-const socket = getSocket()
+let socket = getSocket()
 
 const statusText = computed(() => {
   switch (status.value) {
@@ -86,6 +86,12 @@ async function startSharing() {
 
     status.value = 'sharing'
 
+    // Get fresh socket and register handlers
+    socket = getSocket()
+    socket.on('viewer-joined', handleViewerJoined)
+    socket.on('answer', handleAnswer)
+    socket.on('ice-candidate', handleIceCandidate)
+
     // Connect to signaling server
     connectSocket()
     socket.emit('join-share', { token: token.value, name: workerName.value.trim() })
@@ -127,17 +133,19 @@ function stopSharing() {
 async function handleViewerJoined(data: { viewerId: string }) {
   if (!localStream.value) return
 
+  const viewerId = data.viewerId
+
   // Close any existing peer connection for this viewer
-  const existingPc = peerConnections.get(data.viewerId)
+  const existingPc = peerConnections.get(viewerId)
   if (existingPc) {
     closePeerConnection(existingPc)
-    peerConnections.delete(data.viewerId)
+    peerConnections.delete(viewerId)
   }
 
   const pc = createPeerConnection({
     onIceCandidate: (candidate) => {
       socket.emit('ice-candidate', {
-        targetId: data.viewerId,
+        targetId: viewerId,
         candidate: candidate.toJSON(),
       })
     },
@@ -148,24 +156,33 @@ async function handleViewerJoined(data: { viewerId: string }) {
     pc.addTrack(track, localStream.value!)
   })
 
-  peerConnections.set(data.viewerId, pc)
+  peerConnections.set(viewerId, pc)
 
-  // Create and send offer
-  const offer = await createOffer(pc)
-  socket.emit('offer', {
-    viewerId: data.viewerId,
-    offer,
-  })
+  try {
+    // Create and send offer
+    const offer = await createOffer(pc)
+    socket.emit('offer', {
+      viewerId: viewerId,
+      offer,
+    })
+  } catch (err) {
+    console.error(`Failed to create offer for ${viewerId}:`, err)
+    closePeerConnection(pc)
+    peerConnections.delete(viewerId)
+  }
 }
 
 // Handle answer from viewer
 async function handleAnswer(data: { viewerId: string; answer: RTCSessionDescriptionInit }) {
-  const pc = peerConnections.get(data.viewerId)
-  if (pc) {
+  const viewerId = data.viewerId
+  const pc = peerConnections.get(viewerId)
+  if (!pc) return
+
+  try {
     await setRemoteDescription(pc, data.answer)
 
     // Apply any pending ICE candidates that arrived before the answer
-    const pending = pendingIceCandidates.get(data.viewerId)
+    const pending = pendingIceCandidates.get(viewerId)
     if (pending && pending.length > 0) {
       for (const candidate of pending) {
         try {
@@ -174,8 +191,10 @@ async function handleAnswer(data: { viewerId: string; answer: RTCSessionDescript
           // Ignore errors
         }
       }
-      pendingIceCandidates.delete(data.viewerId)
+      pendingIceCandidates.delete(viewerId)
     }
+  } catch (err) {
+    console.error(`Failed to set remote description for ${viewerId}:`, err)
   }
 }
 
@@ -198,10 +217,6 @@ async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandi
   }
 }
 
-socket.on('viewer-joined', handleViewerJoined)
-socket.on('answer', handleAnswer)
-socket.on('ice-candidate', handleIceCandidate)
-
 onMounted(() => {
   // Validate token exists
   if (!token.value) {
@@ -211,15 +226,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // Clean up socket event handlers
-  socket.off('viewer-joined', handleViewerJoined)
-  socket.off('answer', handleAnswer)
-  socket.off('ice-candidate', handleIceCandidate)
-
   if (status.value === 'sharing') {
     stopSharing()
   }
   pendingIceCandidates.clear()
+  // Disconnect socket (this also removes all listeners)
   disconnectSocket()
 })
 </script>
