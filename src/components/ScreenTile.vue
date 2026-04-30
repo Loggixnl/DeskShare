@@ -7,7 +7,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'focus', token: string): void
+  (e: 'focus', sessionId: string): void
 }>()
 
 const videoElement = ref<HTMLVideoElement | null>(null)
@@ -75,7 +75,7 @@ onUnmounted(() => {
 
       <!-- Focus button (shows on hover) -->
       <button
-        @click="emit('focus', session.token)"
+        @click="emit('focus', session.sessionId)"
         class="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white p-2 rounded opacity-0 group-hover:opacity-100 transition"
       >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

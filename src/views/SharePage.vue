@@ -110,8 +110,8 @@ function stopSharing() {
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
 
-  // Notify server
-  socket.emit('share-stopped', { token: token.value })
+  // Notify server (server identifies session by socket.id)
+  socket.emit('share-stopped')
 
   // Clear video
   if (videoElement.value) {

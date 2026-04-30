@@ -34,6 +34,7 @@ interface DashboardViewer {
   socketId: string
 }
 
+// Key sessions by socketId to allow multiple users with the same token
 const activeSessions = new Map<string, ShareSession>()
 const dashboardViewers = new Map<string, DashboardViewer>()
 
@@ -43,22 +44,23 @@ io.on('connection', (socket) => {
   // Worker joins to share screen
   socket.on('join-share', (data: { token: string; name?: string }) => {
     const { token, name } = data
-    console.log(`[Share] Worker joining: ${token} (${name || 'unnamed'})`)
+    console.log(`[Share] Worker joining: ${token} (${name || 'unnamed'}) with socket ${socket.id}`)
 
-    // Store session
+    // Store session keyed by socketId (allows multiple users with same token)
     const session: ShareSession = {
       token,
       name: name || `Worker ${token.slice(0, 6)}`,
       socketId: socket.id,
       startedAt: new Date(),
     }
-    activeSessions.set(token, session)
+    activeSessions.set(socket.id, session)
 
     // Join room for this token
     socket.join(`share:${token}`)
 
-    // Notify all dashboard viewers about new session
+    // Notify all dashboard viewers about new session (use socketId as unique identifier)
     io.to('dashboard').emit('session-joined', {
+      sessionId: socket.id,
       token,
       name: session.name,
       startedAt: session.startedAt,
@@ -73,8 +75,9 @@ io.on('connection', (socket) => {
     socket.join('dashboard')
     dashboardViewers.set(socket.id, { socketId: socket.id })
 
-    // Send current active sessions
+    // Send current active sessions (include sessionId as unique identifier)
     const sessions = Array.from(activeSessions.values()).map((s) => ({
+      sessionId: s.socketId,
       token: s.token,
       name: s.name,
       startedAt: s.startedAt,
@@ -82,11 +85,11 @@ io.on('connection', (socket) => {
     socket.emit('active-sessions', sessions)
   })
 
-  // Dashboard requests to view a specific share
-  socket.on('request-offer', (data: { token: string }) => {
-    const session = activeSessions.get(data.token)
+  // Dashboard requests to view a specific share (by sessionId)
+  socket.on('request-offer', (data: { sessionId: string }) => {
+    const session = activeSessions.get(data.sessionId)
     if (session) {
-      console.log(`[Signal] Dashboard requesting offer from ${data.token}`)
+      console.log(`[Signal] Dashboard requesting offer from session ${data.sessionId}`)
       io.to(session.socketId).emit('viewer-joined', {
         viewerId: socket.id,
       })
@@ -98,8 +101,8 @@ io.on('connection', (socket) => {
     console.log(`[Signal] Offer from ${socket.id} to ${data.viewerId}`)
     io.to(data.viewerId).emit('offer', {
       sharerId: socket.id,
+      sessionId: socket.id, // sessionId is the sharer's socket ID
       offer: data.offer,
-      token: getTokenBySocketId(socket.id),
     })
   })
 
@@ -121,36 +124,26 @@ io.on('connection', (socket) => {
   })
 
   // Worker stops sharing
-  socket.on('share-stopped', (data: { token: string }) => {
-    console.log(`[Share] Stopped: ${data.token}`)
-    activeSessions.delete(data.token)
-    io.to('dashboard').emit('session-left', { token: data.token })
+  socket.on('share-stopped', () => {
+    console.log(`[Share] Stopped: ${socket.id}`)
+    activeSessions.delete(socket.id)
+    io.to('dashboard').emit('session-left', { sessionId: socket.id })
   })
 
   // Handle disconnect
   socket.on('disconnect', () => {
     console.log(`[Socket] Disconnected: ${socket.id}`)
 
-    // Check if this was a sharer
-    const token = getTokenBySocketId(socket.id)
-    if (token) {
-      activeSessions.delete(token)
-      io.to('dashboard').emit('session-left', { token })
+    // Check if this was a sharer (sessions are keyed by socketId)
+    if (activeSessions.has(socket.id)) {
+      activeSessions.delete(socket.id)
+      io.to('dashboard').emit('session-left', { sessionId: socket.id })
     }
 
     // Remove from dashboard viewers
     dashboardViewers.delete(socket.id)
   })
 })
-
-function getTokenBySocketId(socketId: string): string | undefined {
-  for (const [token, session] of activeSessions) {
-    if (session.socketId === socketId) {
-      return token
-    }
-  }
-  return undefined
-}
 
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
