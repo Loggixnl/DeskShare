@@ -21,6 +21,8 @@ const sessions = ref<Map<string, ActiveSession>>(new Map())
 const peerConnections = new Map<string, RTCPeerConnection>()
 // Map sharer socket IDs to sessionIds for ICE candidate routing
 const sharerIdToSession = new Map<string, string>()
+// Buffer ICE candidates that arrive before remote description is set
+const pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>()
 
 // Focus mode
 const focusedSessionId = ref<string | null>(null)
@@ -147,23 +149,41 @@ async function handleOffer(data: { sharerId: string; sessionId: string; offer: R
     sharerId: data.sharerId,
     answer,
   })
+
+  // Apply any pending ICE candidates that arrived before the offer
+  const pending = pendingIceCandidates.get(data.sessionId)
+  if (pending && pending.length > 0) {
+    for (const candidate of pending) {
+      try {
+        await addIceCandidate(pc, candidate)
+      } catch {
+        // Ignore errors
+      }
+    }
+    pendingIceCandidates.delete(data.sessionId)
+  }
 }
 
 socket.on('offer', handleOffer)
 
 // Handle ICE candidate from sharer
 async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandidateInit }) {
-  // Find the correct peer connection using the sharer ID mapping
-  const sessionId = sharerIdToSession.get(data.fromId)
-  if (sessionId) {
-    const pc = peerConnections.get(sessionId)
-    if (pc) {
-      try {
-        await addIceCandidate(pc, data.candidate)
-      } catch {
-        // ICE candidate might arrive before remote description
-      }
+  // fromId is the sharer's socket ID, which is also the sessionId
+  const sessionId = data.fromId
+  const pc = peerConnections.get(sessionId)
+
+  if (pc && pc.remoteDescription) {
+    // Peer connection exists and has remote description, add candidate directly
+    try {
+      await addIceCandidate(pc, data.candidate)
+    } catch {
+      // Ignore errors
     }
+  } else {
+    // Buffer the candidate for later
+    const pending = pendingIceCandidates.get(sessionId) || []
+    pending.push(data.candidate)
+    pendingIceCandidates.set(sessionId, pending)
   }
 }
 
@@ -197,6 +217,7 @@ onUnmounted(() => {
   peerConnections.forEach((pc) => closePeerConnection(pc))
   peerConnections.clear()
   sharerIdToSession.clear()
+  pendingIceCandidates.clear()
   disconnectSocket()
 })
 

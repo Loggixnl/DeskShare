@@ -27,6 +27,8 @@ const videoElement = ref<HTMLVideoElement | null>(null)
 
 // Track peer connections to dashboard viewers
 const peerConnections = new Map<string, RTCPeerConnection>()
+// Buffer ICE candidates that arrive before remote description is set
+const pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>()
 
 const socket = getSocket()
 
@@ -122,8 +124,15 @@ function stopSharing() {
 }
 
 // Handle viewer joining - create offer for them
-socket.on('viewer-joined', async (data: { viewerId: string }) => {
+async function handleViewerJoined(data: { viewerId: string }) {
   if (!localStream.value) return
+
+  // Close any existing peer connection for this viewer
+  const existingPc = peerConnections.get(data.viewerId)
+  if (existingPc) {
+    closePeerConnection(existingPc)
+    peerConnections.delete(data.viewerId)
+  }
 
   const pc = createPeerConnection({
     onIceCandidate: (candidate) => {
@@ -147,23 +156,51 @@ socket.on('viewer-joined', async (data: { viewerId: string }) => {
     viewerId: data.viewerId,
     offer,
   })
-})
+}
 
 // Handle answer from viewer
-socket.on('answer', async (data: { viewerId: string; answer: RTCSessionDescriptionInit }) => {
+async function handleAnswer(data: { viewerId: string; answer: RTCSessionDescriptionInit }) {
   const pc = peerConnections.get(data.viewerId)
   if (pc) {
     await setRemoteDescription(pc, data.answer)
+
+    // Apply any pending ICE candidates that arrived before the answer
+    const pending = pendingIceCandidates.get(data.viewerId)
+    if (pending && pending.length > 0) {
+      for (const candidate of pending) {
+        try {
+          await addIceCandidate(pc, candidate)
+        } catch {
+          // Ignore errors
+        }
+      }
+      pendingIceCandidates.delete(data.viewerId)
+    }
   }
-})
+}
 
 // Handle ICE candidate from viewer
-socket.on('ice-candidate', async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
+async function handleIceCandidate(data: { fromId: string; candidate: RTCIceCandidateInit }) {
   const pc = peerConnections.get(data.fromId)
-  if (pc) {
-    await addIceCandidate(pc, data.candidate)
+
+  if (pc && pc.remoteDescription) {
+    // Peer connection exists and has remote description, add candidate directly
+    try {
+      await addIceCandidate(pc, data.candidate)
+    } catch {
+      // Ignore errors
+    }
+  } else {
+    // Buffer the candidate for later
+    const pending = pendingIceCandidates.get(data.fromId) || []
+    pending.push(data.candidate)
+    pendingIceCandidates.set(data.fromId, pending)
   }
-})
+}
+
+socket.on('viewer-joined', handleViewerJoined)
+socket.on('answer', handleAnswer)
+socket.on('ice-candidate', handleIceCandidate)
 
 onMounted(() => {
   // Validate token exists
@@ -174,9 +211,15 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // Clean up socket event handlers
+  socket.off('viewer-joined', handleViewerJoined)
+  socket.off('answer', handleAnswer)
+  socket.off('ice-candidate', handleIceCandidate)
+
   if (status.value === 'sharing') {
     stopSharing()
   }
+  pendingIceCandidates.clear()
   disconnectSocket()
 })
 </script>
